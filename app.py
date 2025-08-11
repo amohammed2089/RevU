@@ -1,29 +1,95 @@
-import streamlit as st
-import tempfile, subprocess, json, os
+import os
+import json
+import subprocess
+import tempfile
 from typing import List, Dict
 
-st.set_page_config(page_title="RevU — Web Code Review Bot", page_icon="🤖")
-st.title("🤖 RevU — Web Code Review Bot")
-st.write("Paste code or upload a file. Get instant lint feedback (Python via Ruff) and optional AI suggestions.")
+import streamlit as st
+from openai import OpenAI
+from PIL import Image
 
+# -------------------- Page setup & styles --------------------
+st.set_page_config(page_title="RevU — Your AI Code Reviewer", page_icon="🤖", layout="wide")
+
+CUSTOM_CSS = """
+<style>
+/* cleaner font sizes and spacing */
+h1, h2, h3 { letter-spacing: 0.2px; }
+.small-muted { color:#6b6f76; font-size:0.95rem; }
+
+/* make the main action button red like the mockup */
+.stButton > button {
+  background: #e74c3c !important;
+  color: white !important;
+  border: 0 !important;
+  border-radius: 8px !important;
+  font-weight: 600 !important;
+  padding: 0.75rem 1.1rem !important;
+}
+.stButton > button:hover { filter: brightness(0.95); }
+
+/* soften text area and uploader */
+textarea, .stTextArea textarea {
+  border-radius: 10px !important;
+}
+div[data-testid="stFileUploader"] section[aria-label="base"] {
+  border-radius: 10px !important;
+}
+</style>
+"""
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
+# -------------------- Sidebar --------------------
 with st.sidebar:
     st.header("Settings")
     language = st.selectbox("Language", ["Auto", "Python", "JavaScript / Other"], index=0)
     use_ai = st.toggle("AI suggestions (requires OPENAI_API_KEY)", value=False)
-    st.markdown("---")
-    st.caption("Tip: For Python, Ruff runs locally. For other languages, AI suggestions still help.")
+    st.markdown(
+        "<p class='small-muted'>Tip: For Python, Ruff runs locally. For other languages, AI suggestions still help.</p>",
+        unsafe_allow_html=True
+    )
 
-code = st.text_area("Paste your code here", height=220, placeholder="# Paste code or upload a file below…")
+# -------------------- Title + subheader --------------------
+st.markdown("### ")
+st.markdown("## RevU — Your AI Code Reviewer: From tiny typos to fatal flaws, nothing escapes.")
+st.markdown(
+    "<p class='small-muted'>Paste code or upload a file. Get instant lint feedback (Python via Ruff) and optional AI suggestions.</p>",
+    unsafe_allow_html=True
+)
 
-uploaded = st.file_uploader("…or upload a code file", type=None)
-if uploaded and not code:
+# -------------------- Two-column layout like your screenshot --------------------
+col_img, col_ui = st.columns([0.9, 1.3], vertical_alignment="top")
+
+with col_img:
+    # Try to load local robot image to mimic your mockup
+    robot = None
     try:
-        code = uploaded.read().decode("utf-8", errors="ignore")
+        if os.path.exists("robot.png"):
+            robot = Image.open("robot.png")
     except Exception:
-        code = ""
+        robot = None
+    if robot is not None:
+        st.image(robot, use_column_width=True)
+    else:
+        st.markdown("🧑‍💻")  # minimal placeholder if image missing
 
+with col_ui:
+    # ---- Input area like in the mockup ----
+    label = "Paste your code here –  Sit back, relax, and let RevU catch every code flaw"
+    code = st.text_area(label, height=240, placeholder="# Paste code or upload a file below…")
+
+    uploaded = st.file_uploader("…or upload a code file", type=None)
+    if uploaded and not code:
+        try:
+            code = uploaded.read().decode("utf-8", errors="ignore")
+        except Exception:
+            code = ""
+
+    run_clicked = st.button("🔎 Review Code", use_container_width=True)
+
+# -------------------- Core helpers --------------------
 def run_ruff_on_code(src: str) -> List[Dict]:
-    # Write code to a temp .py and run ruff with JSON output
+    """Write code to a temp .py and run ruff with JSON output."""
     with tempfile.NamedTemporaryFile(delete=False, suffix=".py", mode="w", encoding="utf-8") as f:
         f.write(src)
         tmp_path = f.name
@@ -46,10 +112,16 @@ def show_ruff_results(results: List[Dict]):
     if not results:
         st.success("✅ No Ruff issues found.")
         return
-    st.subheader("Ruff findings")
-    from collections import Counter
-    codes = Counter(r.get("code") for r in results if "code" in r)
-    st.write({k: v for k, v in sorted(codes.items(), key=lambda kv: kv[1], reverse=True)})
+    st.subheader("Ruff findings (Python)")
+    # quick counts by rule
+    counts = {}
+    for r in results:
+        code = r.get("code")
+        if code:
+            counts[code] = counts.get(code, 0) + 1
+    if counts:
+        st.write({k: v for k, v in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)})
+
     rows = []
     for r in results:
         loc = r.get("location", {})
@@ -60,44 +132,68 @@ def show_ruff_results(results: List[Dict]):
             "Column": loc.get("column"),
             "File": r.get("filename")
         })
-    try:
-        import pandas as pd
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
-    except Exception:
-        st.write(rows)
+    st.table(rows)
 
 def ai_review(prompt_code: str, language_hint: str) -> str:
-    # Call OpenAI Responses API if key is available via Streamlit secrets or env
+    """
+    OpenAI SDK v1 usage (latest).
+    Produces a full-spectrum review: tiny style nits -> critical security flaws.
+    """
     api_key = os.environ.get("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", None)
     if not api_key:
-        return "No OPENAI_API_KEY found. Add it in Streamlit Secrets."
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=api_key)
-        system = "You are a senior code reviewer. Give precise, actionable suggestions. Prefer small, safe edits."
-        user = f"Review the following {language_hint} code. Identify bugs, security risks, style issues, and propose concrete improvements with short code snippets:\n\n{prompt_code}"
-        resp = client.responses.create(
-            model="gpt-4o",
-            input=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ]
-        )
-        return resp.output_text.strip()
-    except Exception as e:
-        return f"AI review error: {e}"
+        return "No OPENAI_API_KEY found. Add it via App ▸ Settings ▸ Advanced ▸ Secrets."
 
-if st.button("🔎 Review Code", type="primary", use_container_width=True):
-    if not code.strip():
+    os.environ["OPENAI_API_KEY"] = api_key
+    client = OpenAI()  # uses env var
+
+    checklist = """
+You are a senior code reviewer. Give precise, actionable feedback with short code snippets.
+Check EVERYTHING, from very minor to very critical issues. Use these headings:
+
+[Critical/High/Medium/Low] Syntax & parsing
+[Critical/High/Medium/Low] Runtime errors & exceptions
+[Critical/High/Medium/Low] Logic & algorithmic correctness
+[Critical/High/Medium/Low] Security (injections, path traversal, secrets, deserialization, authN/Z)
+[Critical/High/Medium/Low] Performance & complexity
+[Critical/High/Medium/Low] Concurrency/async pitfalls
+[Critical/High/Medium/Low] Resource handling (files, sockets, memory)
+[Critical/High/Medium/Low] Input validation & edge cases
+[Critical/High/Medium/Low] Error handling & resilience
+[Critical/High/Medium/Low] API usage & compatibility
+[Critical/High/Medium/Low] Maintainability & readability
+[Critical/High/Medium/Low] Style/formatting
+[Critical/High/Medium/Low] Testing & coverage
+[Critical/High/Medium/Low] Dependency & config risks
+[Critical/High/Medium/Low] Web-specific headers/CORS/auth when relevant
+
+Rules:
+- Group findings under these headings.
+- Keep explanations concise; include concrete fixes (small code blocks or diff-style).
+"""
+
+    user_msg = f"Language: {language_hint}\n\nCode to review:\n\n{prompt_code}"
+
+    resp = client.responses.create(
+        model="gpt-4o",
+        input=[
+            {"role": "system", "content": checklist},
+            {"role": "user", "content": user_msg},
+        ],
+    )
+    return resp.output_text.strip()
+
+# -------------------- Run review --------------------
+if run_clicked:
+    if not code or not code.strip():
         st.warning("Please paste code or upload a file first.")
         st.stop()
 
-    # Detect language
+    # determine language (simple heuristic)
     lang = language
     if lang == "Auto":
         if uploaded and uploaded.name.endswith(".py"):
             lang = "Python"
-        elif "import " in code or "def " in code or "class " in code:
+        elif any(tok in code for tok in ["import ", "def ", "class "]):
             lang = "Python"
         else:
             lang = "JavaScript / Other"
@@ -109,17 +205,16 @@ if st.button("🔎 Review Code", type="primary", use_container_width=True):
             ruff_results = run_ruff_on_code(code)
             show_ruff_results(ruff_results)
         except FileNotFoundError:
-            st.error("Ruff is not installed. Please add `ruff` to requirements.txt.")
+            st.error("Ruff not installed. Ensure `ruff==0.6.9` is in requirements.txt.")
         except Exception as e:
             st.error(f"Ruff error: {e}")
     else:
         st.caption("Skipping Ruff (Python-only).")
 
-    # AI suggestions (optional)
     if use_ai:
         with st.spinner("Generating AI suggestions…"):
             feedback = ai_review(code, lang)
         st.subheader("💡 AI Suggestions")
         st.write(feedback)
     else:
-        st.caption("Enable AI suggestions in the sidebar to get refactor ideas and security notes.")
+        st.caption("Toggle AI suggestions in the sidebar to get deep review.")
