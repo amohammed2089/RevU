@@ -1,19 +1,28 @@
-# RevU — Web Code Review Bot
+# RevU — Your AI Code Reviewer (Streamlit)
 
-Paste or upload code and get instant feedback:
-- **Python linting** via Ruff
-- **Optional AI suggestions** via OpenAI (set `OPENAI_API_KEY` in Secrets)
+RevU reviews pasted or uploaded code and surfaces:
+- **Compile-time errors** (`SyntaxError`, `IndentationError`, `TabError`, etc.)
+- **Sandboxed runtime exceptions** (first raised exception) and **Warnings** (Deprecation/Resource/Encoding/…)
+- **Security & error-handling smells** (e.g., `eval`, `pickle.loads`, `yaml.load` without `SafeLoader`, `shell=True`, bare/broad `except`)
+- **Ruff** lint results (Python)
+- Optional **AI suggestions** (OpenAI)
 
-## Deploy on Streamlit Community Cloud
-1) Put `app.py` and `requirements.txt` in a GitHub repo.
-2) In Streamlit Cloud, create a new app from that repo (entry file: `app.py`).
-3) (Optional) Add `OPENAI_API_KEY` in **Secrets** to enable AI suggestions.
-4) Share your public URL.
+> Runtime execution is **off by default**. Enable it only for trusted snippets.
 
-Docs:
-- Streamlit Deploy: https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app  
-- Secrets: https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/secrets-management  
-- Ruff Linter: https://docs.astral.sh/ruff/  
-- OpenAI Responses API: https://platform.openai.com/docs/api-reference/responses
+---
 
-## Local run
+## Quick start
+
+```bash
+# 1) Clone
+git clone <your-repo-url>
+cd <your-repo-name>
+
+# 2) (Optional) create venv
+python -m venv .venv && . .venv/bin/activate  # Windows: .venv\Scripts\activate
+
+# 3) Install
+pip install -r requirements.txt
+
+# 4) Run
+streamlit run app.py
