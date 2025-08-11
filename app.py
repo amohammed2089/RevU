@@ -10,6 +10,7 @@ import streamlit as st
 from openai import OpenAI, RateLimitError, APIError
 from PIL import Image
 
+
 # -------------------- Page setup & styles --------------------
 st.set_page_config(page_title="RevU — Your AI Code Reviewer", page_icon="🤖", layout="wide")
 
@@ -34,6 +35,7 @@ div[data-testid="stFileUploader"] section[aria-label="base"] { border-radius: 10
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
+
 # -------------------- Sidebar --------------------
 with st.sidebar:
     st.header("Settings")
@@ -44,6 +46,7 @@ with st.sidebar:
         unsafe_allow_html=True
     )
 
+
 # -------------------- Title + subheader --------------------
 st.markdown("### ")
 st.markdown("## RevU — Your AI Code Reviewer: From tiny typos to fatal flaws, nothing escapes.")
@@ -52,11 +55,11 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+
 # -------------------- Two-column layout --------------------
 col_img, col_ui = st.columns([0.9, 1.3], vertical_alignment="top")
 
 with col_img:
-    # load robot image from repo root if present
     try:
         if os.path.exists("robot.png"):
             st.image(Image.open("robot.png"), use_column_width=True)
@@ -77,6 +80,7 @@ with col_ui:
             code = ""
 
     run_clicked = st.button("🔎 Review Code", use_container_width=True)
+
 
 # -------------------- Ruff helpers --------------------
 def run_ruff_on_code(src: str) -> List[Dict]:
@@ -99,10 +103,12 @@ def run_ruff_on_code(src: str) -> List[Dict]:
         except OSError:
             pass
 
+
 def show_ruff_results(results: List[Dict]):
     if not results:
         st.success("✅ No Ruff issues found.")
         return
+
     st.subheader("Ruff findings (Python)")
     counts = {}
     for r in results:
@@ -124,32 +130,95 @@ def show_ruff_results(results: List[Dict]):
         })
     st.table(rows)
 
-# -------------------- AI review (resilient) --------------------
+
+# -------------------- AI review (explicit taxonomy + backoff) --------------------
 def _ai_review_once(client: OpenAI, prompt_code: str, language_hint: str) -> str:
-    checklist = """
+    # Full-spectrum, explicit checklist including Python exception & warning families
+    checklist = r"""
 You are a senior code reviewer. Give precise, actionable feedback with short code snippets.
-Check EVERYTHING from very minor to very critical issues. Use these headings with severity labels:
-[Critical/High/Medium/Low] Syntax & parsing
-[Critical/High/Medium/Low] Runtime errors & exceptions
-[Critical/High/Medium/Low] Logic & algorithmic correctness
-[Critical/High/Medium/Low] Security (injections, path traversal, secrets, deserialization, authN/Z)
-[Critical/High/Medium/Low] Performance & complexity
-[Critical/High/Medium/Low] Concurrency/async pitfalls
-[Critical/High/Medium/Low] Resource handling (files, sockets, memory)
-[Critical/High/Medium/Low] Input validation & edge cases
-[Critical/High/Medium/Low] Error handling & resilience
-[Critical/High/Medium/Low] API usage & compatibility
-[Critical/High/Medium/Low] Maintainability & readability
-[Critical/High/Medium/Low] Style/formatting
-[Critical/High/Medium/Low] Testing & coverage
-[Critical/High/Medium/Low] Dependency & config risks
-[Critical/High/Medium/Low] Web-specific headers/CORS/auth when relevant
-Rules: Group findings under these headings and include concrete fixes (small code blocks or diff-style).
+Your job is to catch EVERYTHING from tiny style issues to critical failures. Use these headings and mark each finding with [Critical]/[High]/[Medium]/[Low].
+Group findings, be concise, and propose concrete fixes (diff-style or small code blocks).
+
+=== CORE CATEGORIES ===
+[Severity] Syntax & parsing (SyntaxError, IndentationError, TabError)
+[Severity] Runtime errors & exceptions (see explicit lists below)
+[Severity] Logic & algorithmic correctness
+[Severity] Security (injections, path traversal, secrets, unsafe deserialization, authN/authZ, SSRF, RCE)
+[Severity] Performance & complexity (hot loops, N+1, large allocations)
+[Severity] Concurrency/async pitfalls (deadlocks, races, blocking calls in async)
+[Severity] Resource handling (files/sockets/processes, leaks, context managers)
+[Severity] Input validation & edge cases (bounds, None/Null, types, user input)
+[Severity] Error handling & resilience (correct exception types, retries/backoff, fallbacks)
+[Severity] API usage & compatibility (deprecated, wrong params, unsafe defaults)
+[Severity] Maintainability & readability (naming, comments, duplication, long functions)
+[Severity] Style/formatting (PEP8/ruff rules, consistent imports)
+[Severity] Testing & coverage (missing unit tests, fuzz/edge tests)
+[Severity] Dependencies & config risks (vulnerable/outdated libs, hardcoded creds, unsafe settings)
+[Severity] Web-specific headers/CORS/auth when relevant
+
+=== PYTHON EXCEPTIONS — EXPLICITLY CHECK THESE ===
+# BaseException family (usually re-raise or let terminate)
+- BaseException (generic termination signal)
+- SystemExit
+- KeyboardInterrupt
+- GeneratorExit
+- asyncio.CancelledError   # BaseException since 3.8; task cancellations
+
+# Exception family (typical catchable errors)
+- ArithmeticError → ZeroDivisionError, OverflowError, FloatingPointError
+- AssertionError
+- AttributeError
+- BufferError
+- EOFError
+- ImportError → ModuleNotFoundError
+- LookupError → IndexError, KeyError
+- MemoryError
+- NameError → UnboundLocalError
+- OSError (see OS/I/O section below)
+- ReferenceError
+- RuntimeError → NotImplementedError, RecursionError
+- StopIteration, StopAsyncIteration
+- SyntaxError → IndentationError, TabError
+- SystemError
+- TypeError
+- ValueError → UnicodeError → UnicodeDecodeError, UnicodeEncodeError, UnicodeTranslateError
+
+# OS / I/O subclasses (OSError family; explicitly recognize)
+- OSError (IOError alias in Py3)
+- BlockingIOError, ChildProcessError
+- ConnectionError → BrokenPipeError, ConnectionAbortedError, ConnectionRefusedError, ConnectionResetError
+- FileExistsError, FileNotFoundError
+- InterruptedError
+- IsADirectoryError, NotADirectoryError
+- PermissionError, ProcessLookupError
+- TimeoutError
+
+# Warning classes (capture/route correctly; use warnings module / filters as needed)
+- Warning (base)
+- UserWarning
+- DeprecationWarning, PendingDeprecationWarning, FutureWarning
+- SyntaxWarning, RuntimeWarning, ImportWarning
+- UnicodeWarning, BytesWarning, ResourceWarning
+- EncodingWarning (PEP 597; default encoding warnings)
+
+# Async/concurrency special cases
+- asyncio.CancelledError (prefer to re-raise on task cancellation)
+- asyncio.InvalidStateError (task/future state issues)
+- concurrent.futures.CancelledError (library-specific cancellation)
+
+=== HANDLING GUIDELINES ===
+- Flag unhandled exceptions; suggest specific try/except blocks with the **correct** exception types (avoid blanket `except Exception` unless justified; never swallow BaseException).
+- For warnings, propose `warnings.warn`, category-specific filters, or code fixes to eliminate future deprecations.
+- Show safer patterns (context managers for files/sockets, timeouts on network I/O, `async with`, `await` correctness).
+- Provide input validation examples and boundary tests.
+- When security is implicated, show minimal safe fix and reference the risky API or pattern.
+
+Return a compact, well-structured review grouped by the headings above with practical fixes.
 """
     user_msg = f"Language: {language_hint}\n\nCode to review:\n\n{prompt_code}"
 
     resp = client.responses.create(
-        model="gpt-4o-mini",  # lighter model: better rate limits & costs
+        model="gpt-4o-mini",  # lighter model helps avoid rate limits; upgrade if needed
         input=[
             {"role": "system", "content": checklist},
             {"role": "user", "content": user_msg},
@@ -157,9 +226,10 @@ Rules: Group findings under these headings and include concrete fixes (small cod
     )
     return resp.output_text.strip()
 
+
 @st.cache_data(ttl=120)
 def cached_ai_review(prompt_code: str, language_hint: str) -> str:
-    """Wrapper that retries on rate limits/transient errors and caches results briefly."""
+    """Retry on rate limits/transient errors and cache briefly."""
     api_key = os.environ.get("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", None)
     if not api_key:
         return "No OPENAI_API_KEY found. Add it via App ▸ Settings ▸ Advanced ▸ Secrets."
@@ -168,12 +238,12 @@ def cached_ai_review(prompt_code: str, language_hint: str) -> str:
     client = OpenAI()
 
     last_err = None
-    for attempt in range(6):  # ~ up to ~63s worst case
+    for attempt in range(6):  # exponential backoff up to ~1 min
         try:
             return _ai_review_once(client, prompt_code, language_hint)
         except RateLimitError as e:
             last_err = e
-            time.sleep((2 ** attempt) + random.random())  # 1s, 2s, 4s, 8s, ...
+            time.sleep((2 ** attempt) + random.random())
             continue
         except APIError as e:
             last_err = e
@@ -183,13 +253,14 @@ def cached_ai_review(prompt_code: str, language_hint: str) -> str:
             return f"AI review error: {e}"
     return "AI is busy (rate limited). Please try again shortly."
 
+
 # -------------------- Run review --------------------
 if run_clicked:
     if not code or not code.strip():
         st.warning("Please paste code or upload a file first.")
         st.stop()
 
-    # determine language (simple heuristic)
+    # detect language (simple heuristic)
     lang = language
     if lang == "Auto":
         if uploaded and uploaded.name.endswith(".py"):
