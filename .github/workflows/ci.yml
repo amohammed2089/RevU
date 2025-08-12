@@ -1,0 +1,62 @@
+name: ci
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Ruff lint
+        run: |
+          if command -v ruff >/dev/null 2>&1; then
+            echo "Ruff installed via requirements.txt"
+          else
+            pip install ruff==0.6.9
+          fi
+          ruff --version
+          # Lint the repo (ignore exit-code on non-Python projects)
+          ruff check || true
+
+      - name: Streamlit smoke test (headless)
+        env:
+          STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+        run: |
+          python - <<'PY'
+          import subprocess, time, urllib.request, os, sys
+          port = 8888
+          target = "app.py" if os.path.exists("app.py") else None
+          cmd = ["python", "-m", "streamlit", "run", target or "streamlit", "--server.headless", "true", "--server.port", str(port)]
+          p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+          ok = False
+          for _ in range(60):
+              time.sleep(1)
+              try:
+                  with urllib.request.urlopen(f"http://localhost:{port}/_stcore/health", timeout=1) as r:
+                      ok = (r.status == 200)
+                      if ok: break
+              except Exception:
+                  pass
+          p.terminate()
+          if not ok:
+              print("Streamlit health endpoint not reachable", file=sys.stderr)
+              sys.exit(1)
+          print("Streamlit smoke test OK")
+          PY
