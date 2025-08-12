@@ -124,14 +124,15 @@ def compile_check(src: str) -> List[Dict]:
 
 
 # ===================== Runtime probe (Python) =====================
-TRACE_RE = re.compile(
+import re as _re
+TRACE_RE = _re.compile(
     r'^\s*File "(?P<file>.+?)", line (?P<line>\d+),.*?\n(?P<code>.+?)\n(?P<etype>[A-Za-z_][A-Za-z0-9_\.]*): (?P<emsg>.*)$',
-    re.S | re.M
+    _re.S | _re.M
 )
 
-WARN_RE = re.compile(
+WARN_RE = _re.compile(
     r'^(?P<file>.+?):(?P<line>\d+): (?P<category>\w+Warning): (?P<message>.+)$',
-    re.M
+    _re.M
 )
 
 
@@ -155,8 +156,6 @@ def run_runtime_probe(src: str, capture_warnings: bool = True, timeout: float = 
 
 
 def parse_first_exception(stderr: str) -> Optional[Dict]:
-    # Last "ExceptionType: message" usually wins; use regex from final traceback block.
-    # Fallback: simple last-line parse.
     matches = list(TRACE_RE.finditer(stderr))
     if matches:
         m = matches[-1]
@@ -165,7 +164,6 @@ def parse_first_exception(stderr: str) -> Optional[Dict]:
         file_ = m.group("file")
         line = int(m.group("line"))
         return {"Rule": etype, "Message": emsg, "Line": line, "File": file_}
-    # Fallback to last line
     lines = [ln for ln in stderr.strip().splitlines() if ln.strip()]
     if lines:
         last = lines[-1]
@@ -216,27 +214,27 @@ def run_static_scans(src: str) -> List[Dict]:
         findings.append({"Rule": rule, "Message": msg, "Severity": sev, "Line": line})
 
     for pat, msg, sev in SECURITY_PATTERNS:
-        for m in re.finditer(pat, src):
+        for m in _re.finditer(pat, src):
             line = src.count("\n", 0, m.start()) + 1
             add("Security", msg, sev, line)
 
     for pat, msg, sev in ERROR_HANDLING_PATTERNS:
-        for m in re.finditer(pat, src):
+        for m in _re.finditer(pat, src):
             line = src.count("\n", 0, m.start()) + 1
             add("ErrorHandling", msg, sev, line)
 
     for pat, msg, sev in ASYNC_SMELLS:
-        for m in re.finditer(pat, src):
+        for m in _re.finditer(pat, src):
             line = src.count("\n", 0, m.start()) + 1
             add("Async", msg, sev, line)
 
     # Mutable default args (common pitfall)
-    for m in re.finditer(r'def\s+\w+\s*\([^)]*(\w+\s*=\s*\[\]|\w+\s*=\s*\{\})[^)]*\)', src):
+    for m in _re.finditer(r'def\s+\w+\s*\([^)]*(\w+\s*=\s*\[\]|\w+\s*=\s*\{\})[^)]*\)', src):
         line = src.count("\n", 0, m.start()) + 1
         add("Maintainability", "Mutable default argument", "Medium", line)
 
     # Broad except without logging or re-raise (heuristic)
-    for m in re.finditer(r'except\s+Exception\s*:\s*(?:pass|return\s+None\b)', src):
+    for m in _re.finditer(r'except\s+Exception\s*:\s*(?:pass|return\s+None\b)', src):
         line = src.count("\n", 0, m.start()) + 1
         add("ErrorHandling", "Broad except without handling", "Medium", line)
 
