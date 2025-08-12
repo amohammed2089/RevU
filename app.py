@@ -63,7 +63,8 @@ col_img, col_ui = st.columns([0.9, 1.3], vertical_alignment="top")
 with col_img:
     try:
         if os.path.exists("robot.png"):
-            st.image(Image.open("robot.png"), use_column_width=True)
+            # Updated: use_container_width (use_column_width is deprecated)
+            st.image(Image.open("robot.png"), use_container_width=True)
         else:
             st.markdown("🧑‍💻")
     except Exception:
