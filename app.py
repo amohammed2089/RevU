@@ -2,17 +2,13 @@ import os
 import json
 import subprocess
 import tempfile
-import time
-import random
 from typing import List, Dict
 
 import streamlit as st
-from openai import OpenAI, RateLimitError, APIError
 from PIL import Image
 
-
 # -------------------- Page setup & styles --------------------
-st.set_page_config(page_title="RevU — Your AI Code Reviewer", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="RevU — Your Code Reviewer (No AI)", page_icon="🤖", layout="wide")
 
 CUSTOM_CSS = """
 <style>
@@ -35,27 +31,22 @@ div[data-testid="stFileUploader"] section[aria-label="base"] { border-radius: 10
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
-
 # -------------------- Sidebar --------------------
 with st.sidebar:
     st.header("Settings")
     language = st.selectbox("Language", ["Auto", "Python", "JavaScript / Other"], index=0)
-    use_ai = st.toggle("AI suggestions (requires OPENAI_API_KEY)", value=False)
-    debug = st.checkbox("Show debug", value=False)
     st.markdown(
-        "<p class='small-muted'>Tip: For Python, Ruff runs locally. For other languages, AI suggestions still help.</p>",
+        "<p class='small-muted'>Tip: For Python, Ruff runs locally. This app now runs with NO AI.</p>",
         unsafe_allow_html=True
     )
 
-
 # -------------------- Title + subheader --------------------
 st.markdown("### ")
-st.markdown("## RevU — Your AI Code Reviewer: From tiny typos to fatal flaws, nothing escapes.")
+st.markdown("## RevU — Your AI-Free Code Reviewer: From tiny typos to fatal flaws, nothing escapes.")
 st.markdown(
-    "<p class='small-muted'>Paste code or upload a file. Get instant lint feedback (Python via Ruff) and optional AI suggestions.</p>",
+    "<p class='small-muted'>Paste code or upload a file. Get instant <b>Python</b> lint feedback via Ruff and see a comprehensive Python error catalog below.</p>",
     unsafe_allow_html=True
 )
-
 
 # -------------------- Two-column layout --------------------
 col_img, col_ui = st.columns([0.9, 1.3], vertical_alignment="top")
@@ -70,7 +61,7 @@ with col_img:
         st.markdown("🧑‍💻")
 
 with col_ui:
-    label = "Paste your code here –  Sit back, relax, and let RevU catch every code flaw"
+    label = "Paste your code here –  Sit back, relax, and let RevU catch code issues"
     code = st.text_area(label, height=240, placeholder="# Paste code or upload a file below…")
 
     uploaded = st.file_uploader("…or upload a code file", type=None)
@@ -81,7 +72,6 @@ with col_ui:
             code = ""
 
     run_clicked = st.button("🔎 Review Code", use_container_width=True)
-
 
 # -------------------- Ruff helpers --------------------
 def run_ruff_on_code(src: str) -> List[Dict]:
@@ -104,6 +94,39 @@ def run_ruff_on_code(src: str) -> List[Dict]:
         except OSError:
             pass
 
+def classify_findings(results: List[Dict]) -> List[Dict]:
+    """Map Ruff messages to a 'Type of Error' column when obvious (e.g., SyntaxError)."""
+    table = []
+    for r in results:
+        loc = r.get("location", {})
+        msg = r.get("message", "")
+        etype = None
+        # Simple mappings for clarity in the UI
+        if "SyntaxError" in msg or "syntax" in msg.lower():
+            etype = "SyntaxError"
+        elif "Indentation" in msg:
+            etype = "IndentationError"
+        elif "Name is not defined" in msg or "undefined name" in msg.lower():
+            etype = "NameError"
+        elif "attribute" in msg.lower():
+            etype = "AttributeError"
+        elif "division by zero" in msg.lower():
+            etype = "ZeroDivisionError"
+        elif "index" in msg.lower() and "out of range" in msg.lower():
+            etype = "IndexError"
+        elif "permission" in msg.lower():
+            etype = "PermissionError (runtime)"
+        else:
+            etype = r.get("code") or "Lint/Style"
+
+        table.append({
+            "Type of Error": etype,
+            "Message": msg,
+            "Line": loc.get("row"),
+            "Column": loc.get("column"),
+            "File": r.get("filename")
+        })
+    return table
 
 def show_ruff_results(results: List[Dict]):
     if not results:
@@ -111,150 +134,8 @@ def show_ruff_results(results: List[Dict]):
         return
 
     st.subheader("Ruff findings (Python)")
-    counts = {}
-    for r in results:
-        code = r.get("code")
-        if code:
-            counts[code] = counts.get(code, 0) + 1
-    if counts:
-        st.write({k: v for k, v in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)})
-
-    rows = []
-    for r in results:
-        loc = r.get("location", {})
-        rows.append({
-            "Rule": r.get("code"),
-            "Message": r.get("message"),
-            "Line": loc.get("row"),
-            "Column": loc.get("column"),
-            "File": r.get("filename")
-        })
+    rows = classify_findings(results)
     st.table(rows)
-
-
-# -------------------- AI review (explicit taxonomy + backoff) --------------------
-def _ai_review_once(client: OpenAI, prompt_code: str, language_hint: str) -> str:
-    # Full-spectrum, explicit checklist including Python exception & warning families
-    checklist = r"""
-You are a senior code reviewer. Give precise, actionable feedback with short code snippets.
-Your job is to catch EVERYTHING from tiny style issues to critical failures. Use these headings and mark each finding with [Critical]/[High]/[Medium]/[Low].
-Group findings, be concise, and propose concrete fixes (diff-style or small code blocks).
-
-=== CORE CATEGORIES ===
-[Severity] Syntax & parsing (SyntaxError, IndentationError, TabError)
-[Severity] Runtime errors & exceptions (see explicit lists below)
-[Severity] Logic & algorithmic correctness
-[Severity] Security (injections, path traversal, secrets, unsafe deserialization, authN/authZ, SSRF, RCE)
-[Severity] Performance & complexity (hot loops, N+1, large allocations)
-[Severity] Concurrency/async pitfalls (deadlocks, races, blocking calls in async)
-[Severity] Resource handling (files/sockets/processes, leaks, context managers)
-[Severity] Input validation & edge cases (bounds, None/Null, types, user input)
-[Severity] Error handling & resilience (correct exception types, retries/backoff, fallbacks)
-[Severity] API usage & compatibility (deprecated, wrong params, unsafe defaults)
-[Severity] Maintainability & readability (naming, comments, duplication, long functions)
-[Severity] Style/formatting (PEP8/ruff rules, consistent imports)
-[Severity] Testing & coverage (missing unit tests, fuzz/edge tests)
-[Severity] Dependencies & config risks (vulnerable/outdated libs, hardcoded creds, unsafe settings)
-[Severity] Web-specific headers/CORS/auth when relevant
-
-=== PYTHON EXCEPTIONS — EXPLICITLY CHECK THESE ===
-# BaseException family (usually re-raise or let terminate)
-- BaseException (generic termination signal)
-- SystemExit
-- KeyboardInterrupt
-- GeneratorExit
-- asyncio.CancelledError   # BaseException since 3.8; task cancellations
-
-# Exception family (typical catchable errors)
-- ArithmeticError → ZeroDivisionError, OverflowError, FloatingPointError
-- AssertionError
-- AttributeError
-- BufferError
-- EOFError
-- ImportError → ModuleNotFoundError
-- LookupError → IndexError, KeyError
-- MemoryError
-- NameError → UnboundLocalError
-- OSError (see OS/I/O section below)
-- ReferenceError
-- RuntimeError → NotImplementedError, RecursionError
-- StopIteration, StopAsyncIteration
-- SyntaxError → IndentationError, TabError
-- SystemError
-- TypeError
-- ValueError → UnicodeError → UnicodeDecodeError, UnicodeEncodeError, UnicodeTranslateError
-
-# OS / I/O subclasses (OSError family; explicitly recognize)
-- OSError (IOError alias in Py3)
-- BlockingIOError, ChildProcessError
-- ConnectionError → BrokenPipeError, ConnectionAbortedError, ConnectionRefusedError, ConnectionResetError
-- FileExistsError, FileNotFoundError
-- InterruptedError
-- IsADirectoryError, NotADirectoryError
-- PermissionError, ProcessLookupError
-- TimeoutError
-
-# Warning classes (capture/route correctly; use warnings module / filters as needed)
-- Warning (base)
-- UserWarning
-- DeprecationWarning, PendingDeprecationWarning, FutureWarning
-- SyntaxWarning, RuntimeWarning, ImportWarning
-- UnicodeWarning, BytesWarning, ResourceWarning
-- EncodingWarning (PEP 597; default encoding warnings)
-
-# Async/concurrency special cases
-- asyncio.CancelledError (prefer to re-raise on task cancellation)
-- asyncio.InvalidStateError (task/future state issues)
-- concurrent.futures.CancelledError (library-specific cancellation)
-
-=== HANDLING GUIDELINES ===
-- Flag unhandled exceptions; suggest specific try/except blocks with the **correct** exception types (avoid blanket `except Exception` unless justified; never swallow BaseException).
-- For warnings, propose `warnings.warn`, category-specific filters, or code fixes to eliminate future deprecations.
-- Show safer patterns (context managers for files/sockets, timeouts on network I/O, `async with`, `await` correctness).
-- Provide input validation examples and boundary tests.
-- When security is implicated, show minimal safe fix and reference the risky API or pattern.
-
-Return a compact, well-structured review grouped by the headings above with practical fixes.
-"""
-    user_msg = f"Language: {language_hint}\n\nCode to review:\n\n{prompt_code}"
-
-    resp = client.responses.create(
-        model="gpt-4o-mini",  # lighter model helps avoid rate limits; upgrade if needed
-        input=[
-            {"role": "system", "content": checklist},
-            {"role": "user", "content": user_msg},
-        ],
-    )
-    return resp.output_text.strip()
-
-
-@st.cache_data(ttl=120)
-def cached_ai_review(prompt_code: str, language_hint: str) -> str:
-    """Retry on rate limits/transient errors and cache briefly."""
-    api_key = os.environ.get("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", None)
-    if not api_key:
-        return "AI review error: OPENAI_API_KEY not found in Secrets."
-
-    os.environ["OPENAI_API_KEY"] = api_key
-    client = OpenAI()
-
-    last_err = None
-    for attempt in range(6):  # exponential backoff up to ~1 minute
-        try:
-            text = _ai_review_once(client, prompt_code, language_hint)
-            if text and text.strip():
-                return text.strip()
-            last_err = "Empty AI response"
-        except RateLimitError as e:
-            last_err = f"RateLimitError: {e}"
-        except APIError as e:
-            last_err = f"APIError: {e}"
-        except Exception as e:
-            last_err = f"Exception: {e}"
-        time.sleep((2 ** attempt) + random.random())
-
-    return f"AI review error after retries: {last_err}"
-
 
 # -------------------- Run review --------------------
 if run_clicked:
@@ -283,19 +164,59 @@ if run_clicked:
         except Exception as e:
             st.error(f"Ruff error: {e}")
     else:
-        st.caption("Skipping Ruff (Python-only).")
+        st.warning("This app’s local checks are Python-focused. Paste Python to see detailed findings.")
 
-    if use_ai:
-        with st.spinner("Generating AI suggestions…"):
-            feedback = cached_ai_review(code, lang)
+# -------------------- Comprehensive Error Catalog (Python) --------------------
+st.markdown("## 🧭 Comprehensive Error Catalog (Python)")
+st.caption(
+    "This catalog lists major built-in exception families, OS/I/O subclasses, warnings, and asyncio/concurrency cases."
+)
 
-        st.subheader("💡 AI Suggestions")
-        if not feedback or not feedback.strip():
-            st.error("No AI text returned. Check logs and secrets.")
-        else:
-            st.write(feedback)
+with st.expander("BaseException family (termination signals)"):
+    st.markdown(
+        "- **BaseException** – process termination signal\n"
+        "- **SystemExit**\n- **KeyboardInterrupt**\n- **GeneratorExit**\n"
+        "- **asyncio.CancelledError** (BaseException since 3.8; task cancellations)",
+    )
+    st.caption("Refs: built-in exceptions; asyncio exceptions docs.")  # see citations in chat
 
-        if debug:
-            st.code(feedback if isinstance(feedback, str) else str(feedback), language="markdown")
-    else:
-        st.caption("Toggle AI suggestions in the sidebar to get deep review.")
+with st.expander("Exception family (catchable runtime errors)"):
+    st.markdown(
+        "- **ArithmeticError** → ZeroDivisionError, OverflowError, FloatingPointError\n"
+        "- **AssertionError**\n- **AttributeError**\n- **BufferError**\n- **EOFError**\n"
+        "- **ImportError** → ModuleNotFoundError\n- **LookupError** → IndexError, KeyError\n"
+        "- **MemoryError**\n- **NameError** → UnboundLocalError\n- **OSError** (see next)\n"
+        "- **ReferenceError**\n- **RuntimeError** → NotImplementedError, RecursionError\n"
+        "- **StopIteration**, **StopAsyncIteration**\n- **SyntaxError** → IndentationError, TabError\n"
+        "- **SystemError**\n- **TypeError**\n- **ValueError** → UnicodeError → UnicodeDecodeError, UnicodeEncodeError, UnicodeTranslateError"
+    )
+
+with st.expander("OS / I/O subclasses (OSError family)"):
+    st.markdown(
+        "- **OSError** (alias: IOError in Py3)\n"
+        "- **BlockingIOError**, **ChildProcessError**\n"
+        "- **ConnectionError** → BrokenPipeError, ConnectionAbortedError, ConnectionRefusedError, ConnectionResetError\n"
+        "- **FileExistsError**, **FileNotFoundError**\n"
+        "- **InterruptedError**\n- **IsADirectoryError**, **NotADirectoryError**\n"
+        "- **PermissionError**, **ProcessLookupError**\n- **TimeoutError**"
+    )
+
+with st.expander("Warning classes (non-fatal alerts)"):
+    st.markdown(
+        "- **Warning** (base)\n- **UserWarning**\n- **DeprecationWarning**, **PendingDeprecationWarning**, **FutureWarning**\n"
+        "- **SyntaxWarning**, **RuntimeWarning**, **ImportWarning**\n"
+        "- **UnicodeWarning**, **BytesWarning**, **ResourceWarning**\n"
+        "- **EncodingWarning** (PEP 597; default encoding warnings)"
+    )
+
+with st.expander("Async / concurrency specials"):
+    st.markdown(
+        "- **asyncio.CancelledError** (usually re-raise after cleanup)\n"
+        "- **asyncio.InvalidStateError** (task/future misuse)\n"
+        "- **concurrent.futures.CancelledError**"
+    )
+
+st.caption(
+    "Authoritative references: Python built-in exceptions, warnings, asyncio exceptions, and OS/I/O notes. "
+    "See the links in our chat message for details."
+)
