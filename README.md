@@ -1,28 +1,15 @@
-# RevU — Your AI Code Reviewer (Streamlit)
+# Web Code Review Bot (Streamlit)
 
-RevU reviews pasted or uploaded code and surfaces:
-- **Compile-time errors** (`SyntaxError`, `IndentationError`, `TabError`, etc.)
-- **Sandboxed runtime exceptions** (first raised exception) and **Warnings** (Deprecation/Resource/Encoding/…)
-- **Security & error-handling smells** (e.g., `eval`, `pickle.loads`, `yaml.load` without `SafeLoader`, `shell=True`, bare/broad `except`)
-- **Ruff** lint results (Python)
-- Optional **AI suggestions** (OpenAI)
+A shareable web app where anyone can paste or upload code to get instant feedback:
+- **Python linting** locally via **Ruff**
+- **Optional AI suggestions** via OpenAI (set `OPENAI_API_KEY` in secrets)
 
-> Runtime execution is **off by default**. Enable it only for trusted snippets.
+## Deploy on Streamlit Community Cloud
+1. Push these files to a GitHub repo.
+2. On Streamlit Cloud, create a new app from that repo, select `app.py`.
+3. (Optional) Add `OPENAI_API_KEY` in Secrets for AI suggestions.
+4. Share your public URL.
 
----
-
-## Quick start
-
-```bash
-# 1) Clone
-git clone <your-repo-url>
-cd <your-repo-name>
-
-# 2) (Optional) create venv
-python -m venv .venv && . .venv/bin/activate  # Windows: .venv\Scripts\activate
-
-# 3) Install
-pip install -r requirements.txt
-
-# 4) Run
+## Local run
+pip install -r requirements.txt  
 streamlit run app.py
