@@ -52,7 +52,6 @@ jobs:
           eslint_flags: "."
 
   ai-review:
-    if: ${{ false }} # remove this line to enable AI
     runs-on: ubuntu-latest
     permissions:
       contents: read
