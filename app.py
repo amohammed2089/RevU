@@ -41,6 +41,7 @@ with st.sidebar:
     st.header("Settings")
     language = st.selectbox("Language", ["Auto", "Python", "JavaScript / Other"], index=0)
     use_ai = st.toggle("AI suggestions (requires OPENAI_API_KEY)", value=False)
+    debug = st.checkbox("Show debug", value=False)
     st.markdown(
         "<p class='small-muted'>Tip: For Python, Ruff runs locally. For other languages, AI suggestions still help.</p>",
         unsafe_allow_html=True
@@ -232,26 +233,27 @@ def cached_ai_review(prompt_code: str, language_hint: str) -> str:
     """Retry on rate limits/transient errors and cache briefly."""
     api_key = os.environ.get("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", None)
     if not api_key:
-        return "No OPENAI_API_KEY found. Add it via App ▸ Settings ▸ Advanced ▸ Secrets."
+        return "AI review error: OPENAI_API_KEY not found in Secrets."
 
     os.environ["OPENAI_API_KEY"] = api_key
     client = OpenAI()
 
     last_err = None
-    for attempt in range(6):  # exponential backoff up to ~1 min
+    for attempt in range(6):  # exponential backoff up to ~1 minute
         try:
-            return _ai_review_once(client, prompt_code, language_hint)
+            text = _ai_review_once(client, prompt_code, language_hint)
+            if text and text.strip():
+                return text.strip()
+            last_err = "Empty AI response"
         except RateLimitError as e:
-            last_err = e
-            time.sleep((2 ** attempt) + random.random())
-            continue
+            last_err = f"RateLimitError: {e}"
         except APIError as e:
-            last_err = e
-            time.sleep(2)
-            continue
+            last_err = f"APIError: {e}"
         except Exception as e:
-            return f"AI review error: {e}"
-    return "AI is busy (rate limited). Please try again shortly."
+            last_err = f"Exception: {e}"
+        time.sleep((2 ** attempt) + random.random())
+
+    return f"AI review error after retries: {last_err}"
 
 
 # -------------------- Run review --------------------
@@ -286,7 +288,14 @@ if run_clicked:
     if use_ai:
         with st.spinner("Generating AI suggestions…"):
             feedback = cached_ai_review(code, lang)
+
         st.subheader("💡 AI Suggestions")
-        st.write(feedback)
+        if not feedback or not feedback.strip():
+            st.error("No AI text returned. Check logs and secrets.")
+        else:
+            st.write(feedback)
+
+        if debug:
+            st.code(feedback if isinstance(feedback, str) else str(feedback), language="markdown")
     else:
         st.caption("Toggle AI suggestions in the sidebar to get deep review.")
