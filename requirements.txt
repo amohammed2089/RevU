@@ -1,3 +1,4 @@
 streamlit==1.37.1
 ruff==0.6.9
 openai==1.97.2
+pillow==10.4.0
