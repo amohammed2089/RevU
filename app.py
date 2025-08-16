@@ -1,5 +1,7 @@
 import os
 import json
+import csv
+import io
 import subprocess
 import tempfile
 from typing import List, Dict
@@ -36,7 +38,7 @@ with st.sidebar:
     st.header("Settings")
     language = st.selectbox("Language", ["Auto", "Python", "JavaScript / Other"], index=0)
     st.markdown(
-        "<p class='small-muted'>Tip: For Python, Ruff runs locally. This app now runs with NO AI.</p>",
+        "<p class='small-muted'>Tip: For Python, Ruff runs locally. This app runs with <b>no AI</b>.</p>",
         unsafe_allow_html=True
     )
 
@@ -44,7 +46,7 @@ with st.sidebar:
 st.markdown("### ")
 st.markdown("## RevU — Your AI-Free Code Reviewer: From tiny typos to fatal flaws, nothing escapes.")
 st.markdown(
-    "<p class='small-muted'>Paste code or upload a file. Get instant <b>Python</b> lint feedback via Ruff and see a comprehensive Python error catalog below.</p>",
+    "<p class='small-muted'>Paste code or upload a file. Get instant <b>Python</b> lint feedback via Ruff and download a full Python error catalog.</p>",
     unsafe_allow_html=True
 )
 
@@ -94,31 +96,61 @@ def run_ruff_on_code(src: str) -> List[Dict]:
         except OSError:
             pass
 
+# Map common message patterns to Python error types
+ERROR_PATTERNS = [
+    ("syntaxerror", "SyntaxError"),
+    ("expected ':'", "SyntaxError"),
+    ("expected an indented block", "IndentationError"),
+    ("indentation", "IndentationError"),
+    ("taberror", "TabError"),
+    ("undefined name", "NameError"),
+    ("name is not defined", "NameError"),
+    ("unboundlocalerror", "UnboundLocalError"),
+    ("attributeerror", "AttributeError"),
+    ("has no attribute", "AttributeError"),
+    ("typeerror", "TypeError"),
+    ("unsupported operand type", "TypeError"),
+    ("valuerror", "ValueError"),
+    ("valueerror", "ValueError"),
+    ("unicodeencodeerror", "UnicodeEncodeError"),
+    ("unicodedecodeerror", "UnicodeDecodeError"),
+    ("unicodetranslateerror", "UnicodeTranslateError"),
+    ("zerodivisionerror", "ZeroDivisionError"),
+    ("division by zero", "ZeroDivisionError"),
+    ("indexerror", "IndexError"),
+    ("list index out of range", "IndexError"),
+    ("tuple index out of range", "IndexError"),
+    ("keyerror", "KeyError"),
+    ("module not found", "ModuleNotFoundError"),
+    ("modulenotfounderror", "ModuleNotFoundError"),
+    ("importerror", "ImportError"),
+    ("filenotfounderror", "FileNotFoundError"),
+    ("permissionerror", "PermissionError"),
+    ("timeouterror", "TimeoutError"),
+    ("connectionerror", "ConnectionError"),
+    ("broken pipe", "BrokenPipeError"),
+    ("runtimeerror", "RuntimeError"),
+    ("recursionerror", "RecursionError"),
+    ("notimplementederror", "NotImplementedError"),
+    ("systemerror", "SystemError"),
+    ("memoryerror", "MemoryError"),
+    ("eoferror", "EOFError"),
+]
+
+def _guess_error_type(message: str, default_code: str | None) -> str:
+    msg = (message or "").lower()
+    for needle, tag in ERROR_PATTERNS:
+        if needle in msg:
+            return tag
+    return default_code or "Lint/Style"
+
 def classify_findings(results: List[Dict]) -> List[Dict]:
-    """Map Ruff messages to a 'Type of Error' column when obvious (e.g., SyntaxError)."""
+    """Map Ruff messages to a 'Type of Error' column when obvious."""
     table = []
     for r in results:
         loc = r.get("location", {})
         msg = r.get("message", "")
-        etype = None
-        # Simple mappings for clarity in the UI
-        if "SyntaxError" in msg or "syntax" in msg.lower():
-            etype = "SyntaxError"
-        elif "Indentation" in msg:
-            etype = "IndentationError"
-        elif "Name is not defined" in msg or "undefined name" in msg.lower():
-            etype = "NameError"
-        elif "attribute" in msg.lower():
-            etype = "AttributeError"
-        elif "division by zero" in msg.lower():
-            etype = "ZeroDivisionError"
-        elif "index" in msg.lower() and "out of range" in msg.lower():
-            etype = "IndexError"
-        elif "permission" in msg.lower():
-            etype = "PermissionError (runtime)"
-        else:
-            etype = r.get("code") or "Lint/Style"
-
+        etype = _guess_error_type(msg, r.get("code"))
         table.append({
             "Type of Error": etype,
             "Message": msg,
@@ -128,6 +160,14 @@ def classify_findings(results: List[Dict]) -> List[Dict]:
         })
     return table
 
+def to_csv(rows: List[Dict], headers: List[str]) -> bytes:
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=headers)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({k: row.get(k, "") for k in headers})
+    return buf.getvalue().encode("utf-8")
+
 def show_ruff_results(results: List[Dict]):
     if not results:
         st.success("✅ No Ruff issues found.")
@@ -136,6 +176,15 @@ def show_ruff_results(results: List[Dict]):
     st.subheader("Ruff findings (Python)")
     rows = classify_findings(results)
     st.table(rows)
+
+    # Download button for Ruff findings
+    csv_bytes = to_csv(rows, ["Type of Error", "Message", "Line", "Column", "File"])
+    st.download_button(
+        label="⬇️ Download Ruff findings (CSV)",
+        data=csv_bytes,
+        file_name="ruff_findings.csv",
+        mime="text/csv"
+    )
 
 # -------------------- Run review --------------------
 if run_clicked:
@@ -168,55 +217,133 @@ if run_clicked:
 
 # -------------------- Comprehensive Error Catalog (Python) --------------------
 st.markdown("## 🧭 Comprehensive Error Catalog (Python)")
-st.caption(
-    "This catalog lists major built-in exception families, OS/I/O subclasses, warnings, and asyncio/concurrency cases."
+st.caption("Built from official docs: built-in exceptions, warnings, asyncio exceptions, and OS/I/O subclasses. Download as CSV below.")
+
+def build_error_catalog() -> List[Dict]:
+    cat: List[Dict] = []
+
+    def add(category: str, item: str, notes: str = ""):
+        cat.append({"Category": category, "Item": item, "Notes": notes})
+
+    # BaseException family
+    base = "BaseException family"
+    for item, notes in [
+        ("BaseException", "Generic termination signal"),
+        ("SystemExit", ""),
+        ("KeyboardInterrupt", ""),
+        ("GeneratorExit", ""),
+        ("asyncio.CancelledError", "Subclass of BaseException since 3.8; task cancellation"),
+    ]:
+        add(base, item, notes)
+
+    # Exception family
+    exc = "Exception family"
+    for item, notes in [
+        ("ArithmeticError", "ZeroDivisionError, OverflowError, FloatingPointError"),
+        ("ZeroDivisionError", ""),
+        ("OverflowError", ""),
+        ("FloatingPointError", ""),
+        ("AssertionError", ""),
+        ("AttributeError", ""),
+        ("BufferError", ""),
+        ("EOFError", ""),
+        ("ImportError", "ModuleNotFoundError"),
+        ("ModuleNotFoundError", ""),
+        ("LookupError", "IndexError, KeyError"),
+        ("IndexError", ""),
+        ("KeyError", ""),
+        ("MemoryError", ""),
+        ("NameError", "UnboundLocalError"),
+        ("UnboundLocalError", ""),
+        ("OSError", "See OS/I-O section"),
+        ("ReferenceError", ""),
+        ("RuntimeError", "NotImplementedError, RecursionError"),
+        ("NotImplementedError", ""),
+        ("RecursionError", ""),
+        ("StopIteration", ""),
+        ("StopAsyncIteration", ""),
+        ("SyntaxError", "IndentationError, TabError"),
+        ("IndentationError", ""),
+        ("TabError", ""),
+        ("SystemError", ""),
+        ("TypeError", ""),
+        ("ValueError", "UnicodeError"),
+        ("UnicodeError", "UnicodeDecodeError, UnicodeEncodeError, UnicodeTranslateError"),
+        ("UnicodeDecodeError", ""),
+        ("UnicodeEncodeError", ""),
+        ("UnicodeTranslateError", ""),
+    ]:
+        add(exc, item, notes)
+
+    # OS / I/O subclasses (OSError)
+    osio = "OS / I-O (OSError)"
+    for item in [
+        "BlockingIOError",
+        "ChildProcessError",
+        "ConnectionError",
+        "BrokenPipeError",
+        "ConnectionAbortedError",
+        "ConnectionRefusedError",
+        "ConnectionResetError",
+        "FileExistsError",
+        "FileNotFoundError",
+        "InterruptedError",
+        "IsADirectoryError",
+        "NotADirectoryError",
+        "PermissionError",
+        "ProcessLookupError",
+        "TimeoutError",
+    ]:
+        add(osio, item)
+
+    # Warning classes
+    warn = "Warnings"
+    for item in [
+        "Warning",
+        "UserWarning",
+        "DeprecationWarning",
+        "PendingDeprecationWarning",
+        "FutureWarning",
+        "SyntaxWarning",
+        "RuntimeWarning",
+        "ImportWarning",
+        "UnicodeWarning",
+        "BytesWarning",
+        "ResourceWarning",
+        "EncodingWarning",
+    ]:
+        add(warn, item)
+
+    # Async / Concurrency specials
+    async_cat = "Async / Concurrency"
+    for item, notes in [
+        ("asyncio.CancelledError", "Usually re-raise after cleanup"),
+        ("asyncio.InvalidStateError", "Task/Future misuse"),
+        ("concurrent.futures.CancelledError", "Cancellation in futures"),
+    ]:
+        add(async_cat, item, notes)
+
+    return cat
+
+catalog = build_error_catalog()
+
+# Download button for the catalog
+catalog_csv = to_csv(catalog, ["Category", "Item", "Notes"])
+st.download_button(
+    label="⬇️ Download Comprehensive Error Catalog (CSV)",
+    data=catalog_csv,
+    file_name="python_error_catalog.csv",
+    mime="text/csv",
 )
 
-with st.expander("BaseException family (termination signals)"):
-    st.markdown(
-        "- **BaseException** – process termination signal\n"
-        "- **SystemExit**\n- **KeyboardInterrupt**\n- **GeneratorExit**\n"
-        "- **asyncio.CancelledError** (BaseException since 3.8; task cancellations)",
-    )
-    st.caption("Refs: built-in exceptions; asyncio exceptions docs.")  # see citations in chat
-
-with st.expander("Exception family (catchable runtime errors)"):
-    st.markdown(
-        "- **ArithmeticError** → ZeroDivisionError, OverflowError, FloatingPointError\n"
-        "- **AssertionError**\n- **AttributeError**\n- **BufferError**\n- **EOFError**\n"
-        "- **ImportError** → ModuleNotFoundError\n- **LookupError** → IndexError, KeyError\n"
-        "- **MemoryError**\n- **NameError** → UnboundLocalError\n- **OSError** (see next)\n"
-        "- **ReferenceError**\n- **RuntimeError** → NotImplementedError, RecursionError\n"
-        "- **StopIteration**, **StopAsyncIteration**\n- **SyntaxError** → IndentationError, TabError\n"
-        "- **SystemError**\n- **TypeError**\n- **ValueError** → UnicodeError → UnicodeDecodeError, UnicodeEncodeError, UnicodeTranslateError"
-    )
-
-with st.expander("OS / I/O subclasses (OSError family)"):
-    st.markdown(
-        "- **OSError** (alias: IOError in Py3)\n"
-        "- **BlockingIOError**, **ChildProcessError**\n"
-        "- **ConnectionError** → BrokenPipeError, ConnectionAbortedError, ConnectionRefusedError, ConnectionResetError\n"
-        "- **FileExistsError**, **FileNotFoundError**\n"
-        "- **InterruptedError**\n- **IsADirectoryError**, **NotADirectoryError**\n"
-        "- **PermissionError**, **ProcessLookupError**\n- **TimeoutError**"
-    )
-
-with st.expander("Warning classes (non-fatal alerts)"):
-    st.markdown(
-        "- **Warning** (base)\n- **UserWarning**\n- **DeprecationWarning**, **PendingDeprecationWarning**, **FutureWarning**\n"
-        "- **SyntaxWarning**, **RuntimeWarning**, **ImportWarning**\n"
-        "- **UnicodeWarning**, **BytesWarning**, **ResourceWarning**\n"
-        "- **EncodingWarning** (PEP 597; default encoding warnings)"
-    )
-
-with st.expander("Async / concurrency specials"):
-    st.markdown(
-        "- **asyncio.CancelledError** (usually re-raise after cleanup)\n"
-        "- **asyncio.InvalidStateError** (task/future misuse)\n"
-        "- **concurrent.futures.CancelledError**"
-    )
-
+# Short references
 st.caption(
-    "Authoritative references: Python built-in exceptions, warnings, asyncio exceptions, and OS/I/O notes. "
-    "See the links in our chat message for details."
+    "Sources: Python built-in exceptions, warnings, asyncio exceptions, and Streamlit download button docs."
+)
+st.markdown(
+    "- Built-in exceptions: https://docs.python.org/3/library/exceptions.html  \n"
+    "- Warnings: https://docs.python.org/3/library/warnings.html  \n"
+    "- asyncio exceptions: https://docs.python.org/3/library/asyncio-exceptions.html  \n"
+    "- Task cancellation guidance: https://docs.python.org/3/library/asyncio-task.html  \n"
+    "- Streamlit `st.download_button`: https://docs.streamlit.io/develop/api-reference/widgets/st.download_button"
 )
