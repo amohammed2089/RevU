@@ -4,8 +4,8 @@ import re
 import csv
 import json
 import ast
-import tokenize
 import difflib
+import tokenize
 import subprocess
 import tempfile
 from typing import List, Dict, Optional, Tuple
@@ -14,7 +14,8 @@ import streamlit as st
 
 # -------------------- Page setup & styles --------------------
 st.set_page_config(page_title="RevU — Your Code Reviewer (Enhanced+)", page_icon="🤖", layout="wide")
-st.markdown("""
+st.markdown(
+    """
 <style>
 h1, h2, h3 { letter-spacing: 0.2px; }
 .small-muted { color:#6b6f76; font-size:0.95rem; }
@@ -26,27 +27,35 @@ h1, h2, h3 { letter-spacing: 0.2px; }
 textarea, .stTextArea textarea { border-radius: 10px !important; }
 div[data-testid="stFileUploader"] section[aria-label="base"] { border-radius: 10px !important; }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 # -------------------- Sidebar --------------------
 with st.sidebar:
     st.header("Settings")
     language = st.selectbox("Language", ["Auto", "Python", "JavaScript / Other"], index=0)
-    run_smoke = st.toggle("(Advanced) Attempt runtime smoke test (unsafe)", value=False,
-                          help="Runs code in a subprocess with a short timeout. Only for trusted snippets.")
+    run_smoke = st.toggle(
+        "(Advanced) Attempt runtime smoke test (unsafe)",
+        value=False,
+        help="Runs code in a subprocess with a short timeout. Only for trusted snippets.",
+    )
     apply_fixes_before_runtime = st.toggle(
         "(Advanced) Apply safe quick fixes before runtime",
         value=False,
-        help="Best-effort syntax-only fixes (e.g., missing ':' on block headers) so smoke test can run. Off by default."
+        help="Best-effort syntax-only fixes (e.g., missing ':' on block headers) so smoke test can run.",
     )
     st.markdown(
-        "<p class='small-muted'>Tools: AST, tokenize, parso*, Ruff, mypy, Bandit, pydocstyle, optional Runtime</p>",
-        unsafe_allow_html=True
+        "<p class='small-muted'>Tools: AST, tokenize, parso*, Ruff, Black, isort, mypy, Bandit, pydocstyle, optional Runtime</p>",
+        unsafe_allow_html=True,
     )
 
 # -------------------- Title --------------------
 st.markdown("## RevU — Enhanced Python Code Reviewer (Multi-Syntax + Safe Quick Fixes)")
-st.caption("Reports multiple syntax issues (parso + tokenize + AST), lint, types, security, docstrings, and optional runtime errors. Can auto-fix simple block-colon issues to enable runtime tests.")
+st.caption(
+    "Reports multiple syntax issues (parso + tokenize + AST), lint/style, formatting, imports, types, security, "
+    "docstrings, and optional runtime errors. Can auto-fix simple block-colon issues to enable runtime tests."
+)
 
 # -------------------- UI --------------------
 code = st.text_area("Paste your Python code here", height=240, placeholder="# Paste code or upload a file…")
@@ -61,10 +70,13 @@ run_clicked = st.button("🔎 Review Code", use_container_width=True)
 # -------------------- Helpers --------------------
 def _tmp_py(code_text: str) -> str:
     f = tempfile.NamedTemporaryFile(delete=False, suffix=".py", mode="w", encoding="utf-8")
-    f.write(code_text); f.flush(); f.close()
+    f.write(code_text)
+    f.flush()
+    f.close()
     return f.name
 
-def _run(cmd: List[str], cwd: Optional[str]=None, timeout: int=25) -> Tuple[int, str, str]:
+
+def _run(cmd: List[str], cwd: Optional[str] = None, timeout: int = 25) -> Tuple[int, str, str]:
     try:
         p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
         return p.returncode, p.stdout, p.stderr
@@ -72,6 +84,7 @@ def _run(cmd: List[str], cwd: Optional[str]=None, timeout: int=25) -> Tuple[int,
         return 127, "", f"{cmd[0]}: not installed"
     except subprocess.TimeoutExpired:
         return 124, "", "timeout"
+
 
 def _to_csv(rows: List[Dict], headers: List[str]) -> bytes:
     buf = io.StringIO()
@@ -81,36 +94,48 @@ def _to_csv(rows: List[Dict], headers: List[str]) -> bytes:
         writer.writerow({k: r.get(k, "") for k in headers})
     return buf.getvalue().encode("utf-8")
 
-def _norm_row(source: str, rule: str, typ: str, msg: str,
-              line: Optional[int], col: Optional[int], file: Optional[str],
-              sev: Optional[str]=None) -> Dict:
+
+def _norm_row(
+    source: str,
+    rule: str,
+    typ: str,
+    msg: str,
+    line: Optional[int],
+    col: Optional[int],
+    file: Optional[str],
+    sev: Optional[str] = None,
+) -> Dict:
     return {
-        "Source": source, "Rule": rule or "", "Type": typ or "",
-        "Message": msg or "", "Line": line or "", "Column": col or "",
-        "File": file or "", "Severity/Level": sev or ""
+        "Source": source,
+        "Rule": rule or "",
+        "Type": typ or "",
+        "Message": msg or "",
+        "Line": line or "",
+        "Column": col or "",
+        "File": file or "",
+        "Severity/Level": sev or "",
     }
+
 
 # -------------------- Safe quick fixes (syntax-only) --------------------
 _BLOCK_HEADERS = (
-    r"^\s*(def\s+\w+\s*\(.*\)\s*)",     # def foo(... )
-    r"^\s*(class\s+\w+\s*)",            # class Foo
-    r"^\s*(if\s+.*)",                   # if ...
-    r"^\s*(elif\s+.*)",                 # elif ...
-    r"^\s*(else\s*)",                   # else
-    r"^\s*(for\s+.*)",                  # for ...
-    r"^\s*(while\s+.*)",                # while ...
-    r"^\s*(try\s*)",                    # try
-    r"^\s*(except(\s+.*)?\s*)",         # except [as ...]
-    r"^\s*(finally\s*)",                # finally
-    r"^\s*(with\s+.*)",                 # with ...
+    r"^\s*(def\s+\w+\s*\(.*\)\s*)",  # def foo(... )
+    r"^\s*(class\s+\w+\s*)",         # class Foo
+    r"^\s*(if\s+.*)",                # if ...
+    r"^\s*(elif\s+.*)",              # elif ...
+    r"^\s*(else\s*)",                # else
+    r"^\s*(for\s+.*)",               # for ...
+    r"^\s*(while\s+.*)",             # while ...
+    r"^\s*(try\s*)",                 # try
+    r"^\s*(except(\s+.*)?\s*)",      # except [as ...]
+    r"^\s*(finally\s*)",             # finally
+    r"^\s*(with\s+.*)",              # with ...
 )
 
 def _needs_colon(line: str) -> bool:
-    # ignore empty or comment-only lines
     stripped = line.strip()
     if not stripped or stripped.startswith("#"):
         return False
-    # already has a ':' before any trailing comment?
     no_comment = stripped.split("#", 1)[0].rstrip()
     return not no_comment.endswith(":")
 
@@ -128,32 +153,43 @@ def apply_quick_fixes(original: str) -> Tuple[str, List[int]]:
             if rx.match(line):
                 if _needs_colon(line):
                     lines[idx] = line.rstrip() + ":  # [AUTO-FIXED]"
-                    edited.append(idx + 1)  # 1-based
+                    edited.append(idx + 1)  # 1-based numbering
                 break
-    return ("\n".join(lines) + ("\n" if original.endswith("\n") else "")), edited
+    fixed = "\n".join(lines)
+    if original.endswith("\n") and not fixed.endswith("\n"):
+        fixed += "\n"
+    return fixed, edited
+
 
 # -------------------- Multi-syntax detectors --------------------
 def check_ast_syntax(code_text: str) -> List[Dict]:
-    rows = []
+    rows: List[Dict] = []
     try:
         ast.parse(code_text)
     except SyntaxError as e:
-        rows.append(_norm_row("AST", "SyntaxError", "SyntaxError",
-                              f"{e.msg}", getattr(e, "lineno", None), getattr(e, "offset", None),
-                              "<input>"))
+        rows.append(
+            _norm_row(
+                "AST",
+                "SyntaxError",
+                "SyntaxError",
+                f"{e.msg}",
+                getattr(e, "lineno", None),
+                getattr(e, "offset", None),
+                "<input>",
+            )
+        )
     return rows
 
 def check_tokenize(code_text: str) -> List[Dict]:
-    rows = []
+    rows: List[Dict] = []
     try:
         _ = list(tokenize.generate_tokens(io.StringIO(code_text).readline))
-    except (tokenize.IndentationError, IndentationError) as e:
-        msg = getattr(e, "msg", "Indentation error")
-        (ln, col) = (getattr(e, "lineno", None), getattr(e, "offset", None))
+    except (IndentationError, TabError) as e:
+        msg = getattr(e, "msg", str(e)) or "Indentation error"
+        ln, col = getattr(e, "lineno", None), getattr(e, "offset", None)
         rows.append(_norm_row("tokenize", "IndentationError", "SyntaxError", msg, ln, col, "<input>"))
-    except (tokenize.TokenError, TabError) as e:
-        msg = str(e) or "Token error"
-        rows.append(_norm_row("tokenize", "TokenError", "SyntaxError", msg, None, None, "<input>"))
+    except tokenize.TokenError as e:
+        rows.append(_norm_row("tokenize", "TokenError", "SyntaxError", str(e), None, None, "<input>"))
     return rows
 
 def check_parso(code_text: str) -> Tuple[List[Dict], Optional[str]]:
@@ -173,7 +209,8 @@ def check_parso(code_text: str) -> Tuple[List[Dict], Optional[str]]:
         rows.append(_norm_row("parso", "", "Internal", f"parso failed: {e}", None, None, "<input>"))
     return rows, None
 
-# -------------------- Ruff / mypy / Bandit / pydocstyle --------------------
+
+# -------------------- Ruff / Black / isort / mypy / Bandit / pydocstyle --------------------
 def run_ruff(code_text: str) -> Tuple[List[Dict], Optional[str]]:
     tmp = _tmp_py(code_text)
     try:
@@ -182,69 +219,131 @@ def run_ruff(code_text: str) -> Tuple[List[Dict], Optional[str]]:
             return [], "Ruff not installed"
         if not out.strip():
             return [], None
-        rows = []
-        for item in json.loads(out):
+        rows: List[Dict] = []
+        payload = json.loads(out)
+        for item in payload:
             loc = item.get("location", {})
-            rows.append(_norm_row(
-                "Ruff", item.get("code", ""), "Lint/Style", item.get("message", ""),
-                loc.get("row"), loc.get("column"), item.get("filename", "<input>")
-            ))
+            rows.append(
+                _norm_row(
+                    "Ruff",
+                    item.get("code", ""),
+                    "Lint/Style",
+                    item.get("message", ""),
+                    loc.get("row"),
+                    loc.get("column"),
+                    item.get("filename", "<input>"),
+                )
+            )
         return rows, None
     finally:
-        try: os.remove(tmp)
-        except OSError: pass
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+def run_black_check(code_text: str) -> Tuple[List[Dict], Optional[str]]:
+    tmp = _tmp_py(code_text)
+    try:
+        rc, out, err = _run(["black", "--check", "--diff", tmp])
+        if rc == 127:
+            return [], "Black not installed"
+        rows: List[Dict] = []
+        if rc != 0:  # non-zero when file would be reformatted
+            rows.append(_norm_row("Black", "format", "Formatting", "File would be reformatted", None, None, "<input>"))
+        return rows, None
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+def run_isort_check(code_text: str) -> Tuple[List[Dict], Optional[str]]:
+    tmp = _tmp_py(code_text)
+    try:
+        rc, out, err = _run(["isort", "--check-only", "--diff", tmp])
+        if rc == 127:
+            return [], "isort not installed"
+        rows: List[Dict] = []
+        if rc != 0:  # non-zero when imports not sorted
+            rows.append(_norm_row("isort", "imports", "Import Order", "Imports not correctly sorted", None, None, "<input>"))
+        return rows, None
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 def run_mypy(code_text: str) -> Tuple[List[Dict], Optional[str]]:
     tmp = _tmp_py(code_text)
     try:
-        rc, out, err = _run(["mypy", "--hide-error-context", "--no-pretty", "--show-column-numbers",
-                             "--no-error-summary", "--strict", tmp])
+        rc, out, err = _run(
+            [
+                "mypy",
+                "--hide-error-context",
+                "--no-pretty",
+                "--show-column-numbers",
+                "--no-error-summary",
+                "--strict",
+                tmp,
+            ]
+        )
         if rc == 127:
             return [], "mypy not installed"
-        rows = []
+        rows: List[Dict] = []
         for line in (out + "\n" + err).splitlines():
             if tmp in line:
                 try:
                     _, rest = line.split(f"{tmp}:", 1)
                     parts = rest.split(":", 3)
                     if len(parts) >= 3:
-                        ln = int(parts[0]); col = int(parts[1]); rest2 = parts[2].strip()
+                        ln = int(parts[0])
+                        col = int(parts[1])
+                        rest2 = parts[2].strip()
                         msg = parts[3].strip() if len(parts) == 4 else rest2
                         code_tag = ""
                         if "[" in msg and "]" in msg:
-                            code_tag = msg[msg.rfind("[")+1: msg.rfind("]")]
+                            code_tag = msg[msg.rfind("[") + 1 : msg.rfind("]")]
                         rows.append(_norm_row("mypy", code_tag or "mypy", "TypeError/Typing", msg, ln, col, "<input>"))
                 except Exception:
                     continue
         return rows, None
     finally:
-        try: os.remove(tmp)
-        except OSError: pass
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 def run_bandit(code_text: str) -> Tuple[List[Dict], Optional[str]]:
     tmp = _tmp_py(code_text)
     try:
-        rc, out, err = _run(["bandit", "-f", "json", -q", tmp])
-    except TypeError:
-        # Mac shell quoting glitch fix
-        rc, out, err = _run(["bandit", "-f", "json", "-q", tmp])
-    if rc == 127:
-        return [], "Bandit not installed"
-    rows = []
-    if out.strip():
+        rc, out, err = _run(["bandit", "-f", "json", "-q", tmp])  # fixed quoting
+        if rc == 127:
+            return [], "Bandit not installed"
+        rows: List[Dict] = []
+        if out.strip():
+            try:
+                data = json.loads(out)
+                for issue in data.get("results", []):
+                    rows.append(
+                        _norm_row(
+                            "Bandit",
+                            issue.get("test_id", ""),
+                            "Security",
+                            issue.get("issue_text", ""),
+                            issue.get("line_number"),
+                            None,
+                            issue.get("filename"),
+                            issue.get("issue_severity"),
+                        )
+                    )
+            except Exception:
+                pass
+        return rows, None
+    finally:
         try:
-            data = json.loads(out)
-            for issue in data.get("results", []):
-                rows.append(_norm_row(
-                    "Bandit", issue.get("test_id", ""), "Security", issue.get("issue_text", ""),
-                    issue.get("line_number"), None, issue.get("filename"),
-                    issue.get("issue_severity")
-                ))
-        except Exception:
+            os.remove(tmp)
+        except OSError:
             pass
-    try: os.remove(tmp)
-    except OSError: pass
-    return rows, None
 
 def run_pydocstyle(code_text: str) -> Tuple[List[Dict], Optional[str]]:
     tmp = _tmp_py(code_text)
@@ -252,7 +351,7 @@ def run_pydocstyle(code_text: str) -> Tuple[List[Dict], Optional[str]]:
         rc, out, err = _run(["pydocstyle", tmp])
         if rc == 127:
             return [], "pydocstyle not installed"
-        rows = []
+        rows: List[Dict] = []
         for line in out.splitlines():
             if ":" in line and tmp in line:
                 try:
@@ -264,11 +363,16 @@ def run_pydocstyle(code_text: str) -> Tuple[List[Dict], Optional[str]]:
                     continue
         return rows, None
     finally:
-        try: os.remove(tmp)
-        except OSError: pass
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
 
 # -------------------- Runtime smoke test (with optional quick fixes) --------------------
-def run_smoke_test(code_text: str, maybe_fix: bool) -> Tuple[List[Dict], Optional[str], Optional[str], Optional[str]]:
+def run_smoke_test(
+    code_text: str, maybe_fix: bool
+) -> Tuple[List[Dict], Optional[str], Optional[str], Optional[str]]:
     """
     Returns (rows, note, used_code, diff_text).
     - rows: runtime findings
@@ -279,7 +383,7 @@ def run_smoke_test(code_text: str, maybe_fix: bool) -> Tuple[List[Dict], Optiona
     rows: List[Dict] = []
     note: Optional[str] = None
     used_code = code_text
-    diff_text = None
+    diff_text: Optional[str] = None
 
     def _can_compile(src: str) -> bool:
         try:
@@ -291,16 +395,13 @@ def run_smoke_test(code_text: str, maybe_fix: bool) -> Tuple[List[Dict], Optiona
     if not run_smoke:
         return rows, "Runtime test disabled", None, None
 
-    # Try to compile original first
     if _can_compile(used_code):
         pass
     elif maybe_fix:
         fixed, edited = apply_quick_fixes(used_code)
         if edited and _can_compile(fixed):
-            # Show diff
             diff = difflib.unified_diff(
-                used_code.splitlines(True), fixed.splitlines(True),
-                fromfile="original", tofile="fixed"
+                used_code.splitlines(True), fixed.splitlines(True), fromfile="original", tofile="fixed"
             )
             diff_text = "".join(diff)
             used_code = fixed
@@ -319,20 +420,28 @@ def run_smoke_test(code_text: str, maybe_fix: bool) -> Tuple[List[Dict], Optiona
             rows.append(_norm_row("Runtime", "", "Runtime", first, None, None, "<input>"))
         return rows, note, used_code, diff_text
     finally:
-        try: os.remove(tmp)
-        except OSError: pass
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
 
 # -------------------- Orchestrate checks --------------------
 def analyze(code_text: str) -> Dict[str, List[Dict]]:
-    results = {
+    parso_rows, parso_note = check_parso(code_text)
+    results: Dict[str, List[Dict]] = {
         "AST": check_ast_syntax(code_text),
         "tokenize": check_tokenize(code_text),
-        "parso": check_parso(code_text)[0],
+        "parso": parso_rows,
         "Ruff": run_ruff(code_text)[0],
+        "Black": run_black_check(code_text)[0],
+        "isort": run_isort_check(code_text)[0],
         "mypy": run_mypy(code_text)[0],
         "Bandit": run_bandit(code_text)[0],
         "pydocstyle": run_pydocstyle(code_text)[0],
     }
+    if parso_note:
+        st.caption(f"parso: {parso_note}")
     return results
 
 def flatten(all_results: Dict[str, List[Dict]]) -> List[Dict]:
@@ -340,6 +449,7 @@ def flatten(all_results: Dict[str, List[Dict]]) -> List[Dict]:
     for v in all_results.values():
         rows.extend(v)
     return rows
+
 
 # -------------------- Run review --------------------
 if run_clicked:
@@ -360,7 +470,11 @@ if run_clicked:
         st.warning("This checker focuses on Python.")
         st.stop()
 
-    st.info("Running: AST, tokenize, parso*, Ruff, mypy, Bandit, pydocstyle …")
+    st.info(
+        "Running: AST, tokenize, parso*, Ruff, Black, isort, mypy, Bandit, pydocstyle"
+        + (", Runtime smoke" if run_smoke else "")
+        + " …"
+    )
 
     all_results = analyze(code)
     runtime_rows, runtime_note, used_code, diff_text = run_smoke_test(code, apply_fixes_before_runtime)
@@ -381,18 +495,18 @@ if run_clicked:
                 st.table(rows)
                 st.download_button(
                     label=f"⬇️ Download {tool} findings (CSV)",
-                    data=_to_csv(rows, ["Source","Rule","Type","Message","Line","Column","File","Severity/Level"]),
+                    data=_to_csv(rows, ["Source", "Rule", "Type", "Message", "Line", "Column", "File", "Severity/Level"]),
                     file_name=f"{tool.lower()}_findings.csv",
-                    mime="text/csv"
+                    mime="text/csv",
                 )
             else:
                 st.caption(f"No {tool} findings or tool not installed / not applicable.")
 
         st.download_button(
             label="⬇️ Download All Findings (CSV)",
-            data=_to_csv(combined, ["Source","Rule","Type","Message","Line","Column","File","Severity/Level"]),
+            data=_to_csv(combined, ["Source", "Rule", "Type", "Message", "Line", "Column", "File", "Severity/Level"]),
             file_name="all_findings.csv",
-            mime="text/csv"
+            mime="text/csv",
         )
 
         # Runtime notes + optional diff & fixed code download
@@ -412,10 +526,12 @@ if run_clicked:
 
 # -------------------- References --------------------
 st.markdown("## References")
-st.markdown("- Python built-in exceptions (SyntaxError/IndentationError/TabError): https://docs.python.org/3/library/exceptions.html")
-st.markdown("- Python tokenize module (indentation & token errors): https://docs.python.org/3/library/tokenize.html")
-st.markdown("- Parso tolerant parser (multiple syntax errors): https://parso.readthedocs.io/en/latest/")
+st.markdown("- Python built-in exceptions: https://docs.python.org/3/library/exceptions.html")
+st.markdown("- Python tokenize module: https://docs.python.org/3/library/tokenize.html")
+st.markdown("- Parso tolerant parser: https://parso.readthedocs.io/en/latest/")
 st.markdown("- Ruff (lint/format/imports): https://docs.astral.sh/ruff/")
+st.markdown("- Black (formatter): https://black.readthedocs.io/en/stable/")
+st.markdown("- isort (import sorting): https://pycqa.github.io/isort/")
 st.markdown("- mypy (static typing): https://mypy.readthedocs.io/en/stable/")
 st.markdown("- Bandit (security): https://bandit.readthedocs.io/en/latest/")
 st.markdown("- pydocstyle (docstrings): https://www.pydocstyle.org/en/stable/")
