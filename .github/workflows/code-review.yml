@@ -23,8 +23,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Ruff (lint/style)
-        run: ruff check .
+      - name: Ruff (lint + format + imports)
+        run: ruff check . --fix
+
 
       - name: Black (format check)
         run: black --check .
