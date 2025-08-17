@@ -1,190 +1,267 @@
 import os
-import json
-import csv
 import io
+import csv
+import json
+import ast
 import subprocess
 import tempfile
-from typing import List, Dict
+from typing import List, Dict, Optional, Tuple
 
 import streamlit as st
-from PIL import Image
 
 # -------------------- Page setup & styles --------------------
-st.set_page_config(page_title="RevU — Your Code Reviewer (No AI)", page_icon="🤖", layout="wide")
-
-CUSTOM_CSS = """
+st.set_page_config(page_title="RevU — Your Code Reviewer (Enhanced)", page_icon="🤖", layout="wide")
+st.markdown("""
 <style>
 h1, h2, h3 { letter-spacing: 0.2px; }
 .small-muted { color:#6b6f76; font-size:0.95rem; }
-
 .stButton > button {
-  background: #e74c3c !important;
-  color: white !important;
-  border: 0 !important;
-  border-radius: 8px !important;
-  font-weight: 600 !important;
-  padding: 0.75rem 1.1rem !important;
+  background: #2563eb !important; color: white !important; border: 0 !important;
+  border-radius: 8px !important; font-weight: 600 !important; padding: 0.70rem 1.0rem !important;
 }
 .stButton > button:hover { filter: brightness(0.95); }
-
 textarea, .stTextArea textarea { border-radius: 10px !important; }
 div[data-testid="stFileUploader"] section[aria-label="base"] { border-radius: 10px !important; }
 </style>
-"""
-st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
 # -------------------- Sidebar --------------------
 with st.sidebar:
     st.header("Settings")
     language = st.selectbox("Language", ["Auto", "Python", "JavaScript / Other"], index=0)
+    run_smoke = st.toggle("(Advanced) Attempt runtime smoke test (unsafe)", value=False,
+                          help="Runs code in a subprocess with a short timeout. Use only for trusted snippets.")
     st.markdown(
-        "<p class='small-muted'>Tip: For Python, Ruff runs locally. This app runs with <b>no AI</b>.</p>",
+        "<p class='small-muted'>Tools auto-detected: Ruff, mypy, Bandit, Black, isort, pydocstyle (best effort).</p>",
         unsafe_allow_html=True
     )
 
 # -------------------- Title + subheader --------------------
-st.markdown("### ")
-st.markdown("## RevU — Your AI-Free Code Reviewer: From tiny typos to fatal flaws, nothing escapes.")
+st.markdown("## RevU — Enhanced Python Code Reviewer")
 st.markdown(
-    "<p class='small-muted'>Paste code or upload a file. Get instant <b>Python</b> lint feedback via Ruff and download a full Python error catalog.</p>",
+    "<p class='small-muted'>Paste code or upload a file. Get unified findings across syntax, lint, types, security, formatting, imports, and docstrings.</p>",
     unsafe_allow_html=True
 )
 
-# -------------------- Two-column layout --------------------
-col_img, col_ui = st.columns([0.9, 1.3], vertical_alignment="top")
-
+# -------------------- UI --------------------
+col_img, col_ui = st.columns([0.7, 1.3], vertical_alignment="top")
 with col_img:
-    try:
-        if os.path.exists("robot.png"):
-            st.image(Image.open("robot.png"), use_column_width=True)
-        else:
-            st.markdown("🧑‍💻")
-    except Exception:
-        st.markdown("🧑‍💻")
+    st.markdown("🧑‍💻")
 
 with col_ui:
-    label = "Paste your code here –  Sit back, relax, and let RevU catch code issues"
-    code = st.text_area(label, height=240, placeholder="# Paste code or upload a file below…")
-
+    code = st.text_area("Paste your code here", height=240, placeholder="# Paste code or upload a file below…")
     uploaded = st.file_uploader("…or upload a code file", type=None)
     if uploaded and not code:
         try:
             code = uploaded.read().decode("utf-8", errors="ignore")
         except Exception:
             code = ""
-
     run_clicked = st.button("🔎 Review Code", use_container_width=True)
 
-# -------------------- Ruff helpers --------------------
-def run_ruff_on_code(src: str) -> List[Dict]:
-    """Write code to a temp .py and run ruff with JSON output."""
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".py", mode="w", encoding="utf-8") as f:
-        f.write(src)
-        tmp_path = f.name
+# -------------------- Helpers --------------------
+def _tmp_py(code_text: str) -> str:
+    f = tempfile.NamedTemporaryFile(delete=False, suffix=".py", mode="w", encoding="utf-8")
+    f.write(code_text); f.flush(); f.close()
+    return f.name
+
+def _run(cmd: List[str], cwd: Optional[str]=None, timeout: int=25) -> Tuple[int, str, str]:
     try:
-        completed = subprocess.run(
-            ["ruff", "check", "--output-format=json", tmp_path],
-            capture_output=True, text=True
-        )
-        output = completed.stdout.strip()
-        if not output:
-            return []
-        return json.loads(output)
-    finally:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, p.stdout, p.stderr
+    except FileNotFoundError:
+        return 127, "", f"{cmd[0]}: not installed"
+    except subprocess.TimeoutExpired:
+        return 124, "", "timeout"
 
-# Map common message patterns to Python error types
-ERROR_PATTERNS = [
-    ("syntaxerror", "SyntaxError"),
-    ("expected ':'", "SyntaxError"),
-    ("expected an indented block", "IndentationError"),
-    ("indentation", "IndentationError"),
-    ("taberror", "TabError"),
-    ("undefined name", "NameError"),
-    ("name is not defined", "NameError"),
-    ("unboundlocalerror", "UnboundLocalError"),
-    ("attributeerror", "AttributeError"),
-    ("has no attribute", "AttributeError"),
-    ("typeerror", "TypeError"),
-    ("unsupported operand type", "TypeError"),
-    ("valuerror", "ValueError"),
-    ("valueerror", "ValueError"),
-    ("unicodeencodeerror", "UnicodeEncodeError"),
-    ("unicodedecodeerror", "UnicodeDecodeError"),
-    ("unicodetranslateerror", "UnicodeTranslateError"),
-    ("zerodivisionerror", "ZeroDivisionError"),
-    ("division by zero", "ZeroDivisionError"),
-    ("indexerror", "IndexError"),
-    ("list index out of range", "IndexError"),
-    ("tuple index out of range", "IndexError"),
-    ("keyerror", "KeyError"),
-    ("module not found", "ModuleNotFoundError"),
-    ("modulenotfounderror", "ModuleNotFoundError"),
-    ("importerror", "ImportError"),
-    ("filenotfounderror", "FileNotFoundError"),
-    ("permissionerror", "PermissionError"),
-    ("timeouterror", "TimeoutError"),
-    ("connectionerror", "ConnectionError"),
-    ("broken pipe", "BrokenPipeError"),
-    ("runtimeerror", "RuntimeError"),
-    ("recursionerror", "RecursionError"),
-    ("notimplementederror", "NotImplementedError"),
-    ("systemerror", "SystemError"),
-    ("memoryerror", "MemoryError"),
-    ("eoferror", "EOFError"),
-]
-
-def _guess_error_type(message: str, default_code: str | None) -> str:
-    msg = (message or "").lower()
-    for needle, tag in ERROR_PATTERNS:
-        if needle in msg:
-            return tag
-    return default_code or "Lint/Style"
-
-def classify_findings(results: List[Dict]) -> List[Dict]:
-    """Map Ruff messages to a 'Type of Error' column when obvious."""
-    table = []
-    for r in results:
-        loc = r.get("location", {})
-        msg = r.get("message", "")
-        etype = _guess_error_type(msg, r.get("code"))
-        table.append({
-            "Type of Error": etype,
-            "Message": msg,
-            "Line": loc.get("row"),
-            "Column": loc.get("column"),
-            "File": r.get("filename")
-        })
-    return table
-
-def to_csv(rows: List[Dict], headers: List[str]) -> bytes:
+def _to_csv(rows: List[Dict], headers: List[str]) -> bytes:
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=headers)
     writer.writeheader()
-    for row in rows:
-        writer.writerow({k: row.get(k, "") for k in headers})
+    for r in rows:
+        writer.writerow({k: r.get(k, "") for k in headers})
     return buf.getvalue().encode("utf-8")
 
-def show_ruff_results(results: List[Dict]):
-    if not results:
-        st.success("✅ No Ruff issues found.")
-        return
+def _norm_row(source: str, rule: str, typ: str, msg: str,
+              line: Optional[int], col: Optional[int], file: Optional[str],
+              sev: Optional[str]=None) -> Dict:
+    return {
+        "Source": source, "Rule": rule or "", "Type": typ or "",
+        "Message": msg or "", "Line": line or "", "Column": col or "",
+        "File": file or "", "Severity/Level": sev or ""
+    }
 
-    st.subheader("Ruff findings (Python)")
-    rows = classify_findings(results)
-    st.table(rows)
+# -------------------- Built-in AST syntax check (always on) --------------------
+def check_ast_syntax(code_text: str) -> List[Dict]:
+    rows = []
+    try:
+        ast.parse(code_text)
+    except SyntaxError as e:
+        rows.append(_norm_row(
+            "AST", "SyntaxError", "SyntaxError",
+            f"{e.msg}", getattr(e, "lineno", None), getattr(e, "offset", None),
+            "<input>"
+        ))
+    return rows
 
-    # Download button for Ruff findings
-    csv_bytes = to_csv(rows, ["Type of Error", "Message", "Line", "Column", "File"])
-    st.download_button(
-        label="⬇️ Download Ruff findings (CSV)",
-        data=csv_bytes,
-        file_name="ruff_findings.csv",
-        mime="text/csv"
-    )
+# -------------------- Ruff (lint) --------------------
+def run_ruff(code_text: str) -> Tuple[List[Dict], Optional[str]]:
+    tmp = _tmp_py(code_text)
+    try:
+        rc, out, err = _run(["ruff", "check", "--output-format=json", tmp])
+        if rc == 127:
+            return [], "Ruff not installed"
+        if not out.strip():
+            return [], None
+        rows = []
+        for item in json.loads(out):
+            loc = item.get("location", {})
+            rows.append(_norm_row(
+                "Ruff", item.get("code", ""), "Lint/Style", item.get("message", ""),
+                loc.get("row"), loc.get("column"), item.get("filename", "<input>")
+            ))
+        return rows, None
+    finally:
+        try: os.remove(tmp)
+        except OSError: pass
+
+# -------------------- mypy (types) --------------------
+def run_mypy(code_text: str) -> Tuple[List[Dict], Optional[str]]:
+    tmp = _tmp_py(code_text)
+    try:
+        rc, out, err = _run(["mypy", "--hide-error-context", "--no-pretty", "--show-column-numbers",
+                             "--no-error-summary", "--strict", tmp])
+        if rc == 127:
+            return [], "mypy not installed"
+        rows = []
+        for line in (out + "\n" + err).splitlines():
+            if tmp in line:
+                try:
+                    _, rest = line.split(f"{tmp}:", 1)
+                    parts = rest.split(":", 3)
+                    if len(parts) >= 3:
+                        ln = int(parts[0]); col = int(parts[1]); rest2 = parts[2].strip()
+                        typ = "Type" if "error" in rest2 else "Note"
+                        msg = parts[3].strip() if len(parts) == 4 else rest2
+                        code_tag = ""
+                        if "[" in msg and "]" in msg:
+                            code_tag = msg[msg.rfind("[")+1: msg.rfind("]")]
+                        rows.append(_norm_row("mypy", code_tag, "TypeError/Typing", msg, ln, col, "<input>"))
+                except Exception:
+                    continue
+        return rows, None
+    finally:
+        try: os.remove(tmp)
+        except OSError: pass
+
+# -------------------- Bandit (security) --------------------
+def run_bandit(code_text: str) -> Tuple[List[Dict], Optional[str]]:
+    tmp = _tmp_py(code_text)
+    try:
+        rc, out, err = _run(["bandit", "-f", "json", "-q", tmp])
+        if rc == 127:
+            return [], "Bandit not installed"
+        rows = []
+        if out.strip():
+            data = json.loads(out)
+            for issue in data.get("results", []):
+                rows.append(_norm_row(
+                    "Bandit", issue.get("test_id", ""), "Security", issue.get("issue_text", ""),
+                    issue.get("line_number"), None, issue.get("filename"),
+                    issue.get("issue_severity")
+                ))
+        return rows, None
+    finally:
+        try: os.remove(tmp)
+        except OSError: pass
+
+# -------------------- Black (formatting) --------------------
+def run_black_check(code_text: str) -> Tuple[List[Dict], Optional[str]]:
+    tmp = _tmp_py(code_text)
+    try:
+        rc, out, err = _run(["black", "--check", "--diff", tmp])
+        if rc == 127:
+            return [], "Black not installed"
+        rows = []
+        if rc not in (0,):
+            rows.append(_norm_row("Black", "format", "Formatting", "File would be reformatted", None, None, "<input>"))
+        return rows, None
+    finally:
+        try: os.remove(tmp)
+        except OSError: pass
+
+# -------------------- isort (imports) --------------------
+def run_isort_check(code_text: str) -> Tuple[List[Dict], Optional[str]]:
+    tmp = _tmp_py(code_text)
+    try:
+        rc, out, err = _run(["isort", "--check-only", "--diff", tmp])
+        if rc == 127:
+            return [], "isort not installed"
+        rows = []
+        if rc not in (0,):
+            rows.append(_norm_row("isort", "imports", "Import Order", "Imports not correctly sorted", None, None, "<input>"))
+        return rows, None
+    finally:
+        try: os.remove(tmp)
+        except OSError: pass
+
+# -------------------- pydocstyle (docstrings) --------------------
+def run_pydocstyle(code_text: str) -> Tuple[List[Dict], Optional[str]]:
+    tmp = _tmp_py(code_text)
+    try:
+        rc, out, err = _run(["pydocstyle", tmp])
+        if rc == 127:
+            return [], "pydocstyle not installed"
+        rows = []
+        for line in out.splitlines():
+            if ":" in line and tmp in line:
+                try:
+                    _, rest = line.split(f"{tmp}:", 1)
+                    ln = int(rest.split()[0])
+                    code_tag = rest.split()[-1].split(":")[0] if ":" in rest else "Dxxx"
+                    rows.append(_norm_row("pydocstyle", code_tag, "Docstring", line.strip(), ln, None, "<input>"))
+                except Exception:
+                    continue
+        return rows, None
+    finally:
+        try: os.remove(tmp)
+        except OSError: pass
+
+# -------------------- Optional smoke runtime test --------------------
+def run_smoke_test(code_text: str) -> Tuple[List[Dict], Optional[str]]:
+    if not run_smoke:
+        return [], None
+    tmp = _tmp_py(code_text)
+    try:
+        rc, out, err = _run(["python", "-I", "-X", "faulthandler", tmp], timeout=3)
+        rows = []
+        if rc != 0:
+            msg = (err or out).strip()
+            first = msg.splitlines()[0] if msg else "Runtime error"
+            rows.append(_norm_row("Runtime", "", "Runtime", first, None, None, "<input>"))
+        return rows, None
+    finally:
+        try: os.remove(tmp)
+        except OSError: pass
+
+# -------------------- Orchestrate checks --------------------
+def analyze(code_text: str) -> Dict[str, List[Dict]]:
+    results = {
+        "AST": check_ast_syntax(code_text),
+        "Ruff": run_ruff(code_text)[0],
+        "mypy": run_mypy(code_text)[0],
+        "Bandit": run_bandit(code_text)[0],
+        "Black": run_black_check(code_text)[0],
+        "isort": run_isort_check(code_text)[0],
+        "pydocstyle": run_pydocstyle(code_text)[0],
+        "Runtime": run_smoke_test(code_text)[0],
+    }
+    return results
+
+def flatten(all_results: Dict[str, List[Dict]]) -> List[Dict]:
+    rows: List[Dict] = []
+    for v in all_results.values():
+        rows.extend(v)
+    return rows
 
 # -------------------- Run review --------------------
 if run_clicked:
@@ -192,7 +269,6 @@ if run_clicked:
         st.warning("Please paste code or upload a file first.")
         st.stop()
 
-    # detect language (simple heuristic)
     lang = language
     if lang == "Auto":
         if uploaded and uploaded.name.endswith(".py"):
@@ -202,148 +278,48 @@ if run_clicked:
         else:
             lang = "JavaScript / Other"
 
-    # Ruff for Python
-    if lang == "Python":
-        st.info("Running Ruff (Python linter) locally…")
-        try:
-            ruff_results = run_ruff_on_code(code)
-            show_ruff_results(ruff_results)
-        except FileNotFoundError:
-            st.error("Ruff not installed. Ensure `ruff==0.6.9` is in requirements.txt.")
-        except Exception as e:
-            st.error(f"Ruff error: {e}")
+    if lang != "Python":
+        st.warning("This enhanced checker focuses on Python. Paste Python code for full results.")
+        st.stop()
+
+    st.info("Running checks (AST, Ruff, mypy, Bandit, Black, isort, pydocstyle" +
+            (", Runtime smoke" if run_smoke else "") + ") …")
+
+    all_results = analyze(code)
+    combined = flatten(all_results)
+
+    if not combined:
+        st.success("✅ No issues reported by the enabled tools.")
     else:
-        st.warning("This app’s local checks are Python-focused. Paste Python to see detailed findings.")
+        st.subheader("All Findings (Unified)")
+        st.dataframe(combined, use_container_width=True)
 
-# -------------------- Comprehensive Error Catalog (Python) --------------------
-st.markdown("## 🧭 Comprehensive Error Catalog (Python)")
-st.caption("Built from official docs: built-in exceptions, warnings, asyncio exceptions, and OS/I/O subclasses. Download as CSV below.")
+        for tool, rows in all_results.items():
+            st.markdown(f"### {tool} findings")
+            if rows:
+                st.table(rows)
+                st.download_button(
+                    label=f"⬇️ Download {tool} findings (CSV)",
+                    data=_to_csv(rows, ["Source","Rule","Type","Message","Line","Column","File","Severity/Level"]),
+                    file_name=f"{tool.lower()}_findings.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.caption(f"No {tool} findings or tool not installed / not applicable.")
 
-def build_error_catalog() -> List[Dict]:
-    cat: List[Dict] = []
+        st.download_button(
+            label="⬇️ Download All Findings (CSV)",
+            data=_to_csv(combined, ["Source","Rule","Type","Message","Line","Column","File","Severity/Level"]),
+            file_name="all_findings.csv",
+            mime="text/csv"
+        )
 
-    def add(category: str, item: str, notes: str = ""):
-        cat.append({"Category": category, "Item": item, "Notes": notes})
-
-    # BaseException family
-    base = "BaseException family"
-    for item, notes in [
-        ("BaseException", "Generic termination signal"),
-        ("SystemExit", ""),
-        ("KeyboardInterrupt", ""),
-        ("GeneratorExit", ""),
-        ("asyncio.CancelledError", "Subclass of BaseException since 3.8; task cancellation"),
-    ]:
-        add(base, item, notes)
-
-    # Exception family
-    exc = "Exception family"
-    for item, notes in [
-        ("ArithmeticError", "ZeroDivisionError, OverflowError, FloatingPointError"),
-        ("ZeroDivisionError", ""),
-        ("OverflowError", ""),
-        ("FloatingPointError", ""),
-        ("AssertionError", ""),
-        ("AttributeError", ""),
-        ("BufferError", ""),
-        ("EOFError", ""),
-        ("ImportError", "ModuleNotFoundError"),
-        ("ModuleNotFoundError", ""),
-        ("LookupError", "IndexError, KeyError"),
-        ("IndexError", ""),
-        ("KeyError", ""),
-        ("MemoryError", ""),
-        ("NameError", "UnboundLocalError"),
-        ("UnboundLocalError", ""),
-        ("OSError", "See OS/I-O section"),
-        ("ReferenceError", ""),
-        ("RuntimeError", "NotImplementedError, RecursionError"),
-        ("NotImplementedError", ""),
-        ("RecursionError", ""),
-        ("StopIteration", ""),
-        ("StopAsyncIteration", ""),
-        ("SyntaxError", "IndentationError, TabError"),
-        ("IndentationError", ""),
-        ("TabError", ""),
-        ("SystemError", ""),
-        ("TypeError", ""),
-        ("ValueError", "UnicodeError"),
-        ("UnicodeError", "UnicodeDecodeError, UnicodeEncodeError, UnicodeTranslateError"),
-        ("UnicodeDecodeError", ""),
-        ("UnicodeEncodeError", ""),
-        ("UnicodeTranslateError", ""),
-    ]:
-        add(exc, item, notes)
-
-    # OS / I/O subclasses (OSError)
-    osio = "OS / I-O (OSError)"
-    for item in [
-        "BlockingIOError",
-        "ChildProcessError",
-        "ConnectionError",
-        "BrokenPipeError",
-        "ConnectionAbortedError",
-        "ConnectionRefusedError",
-        "ConnectionResetError",
-        "FileExistsError",
-        "FileNotFoundError",
-        "InterruptedError",
-        "IsADirectoryError",
-        "NotADirectoryError",
-        "PermissionError",
-        "ProcessLookupError",
-        "TimeoutError",
-    ]:
-        add(osio, item)
-
-    # Warning classes
-    warn = "Warnings"
-    for item in [
-        "Warning",
-        "UserWarning",
-        "DeprecationWarning",
-        "PendingDeprecationWarning",
-        "FutureWarning",
-        "SyntaxWarning",
-        "RuntimeWarning",
-        "ImportWarning",
-        "UnicodeWarning",
-        "BytesWarning",
-        "ResourceWarning",
-        "EncodingWarning",
-    ]:
-        add(warn, item)
-
-    # Async / Concurrency specials
-    async_cat = "Async / Concurrency"
-    for item, notes in [
-        ("asyncio.CancelledError", "Usually re-raise after cleanup"),
-        ("asyncio.InvalidStateError", "Task/Future misuse"),
-        ("concurrent.futures.CancelledError", "Cancellation in futures"),
-    ]:
-        add(async_cat, item, notes)
-
-    return cat
-
-catalog = build_error_catalog()
-
-# Download button for the catalog
-catalog_csv = to_csv(catalog, ["Category", "Item", "Notes"])
-st.download_button(
-    label="⬇️ Download Comprehensive Error Catalog (CSV)",
-    data=catalog_csv,
-    file_name="python_error_catalog.csv",
-    mime="text/csv",
-)
-
-# Short references
-st.caption(
-    "Sources: Python built-in exceptions, warnings, asyncio exceptions, and Streamlit download button docs."
-)
-st.markdown(
-    "- Built-in exceptions: https://docs.python.org/3/library/exceptions.html  \n"
-    "- Warnings: https://docs.python.org/3/library/warnings.html  \n"
-    "- asyncio exceptions: https://docs.python.org/3/library/asyncio-exceptions.html  \n"
-    "- Task cancellation guidance: https://docs.python.org/3/library/asyncio-task.html  \n"
-    "- Streamlit `st.download_button`: https://docs.streamlit.io/develop/api-reference/widgets/st.download_button"
-)
+# -------------------- References --------------------
+st.markdown("## References")
+st.markdown("- Python exceptions: https://docs.python.org/3/library/exceptions.html")
+st.markdown("- Ruff (lint): https://docs.astral.sh/ruff/")
+st.markdown("- mypy (types): https://mypy.readthedocs.io/en/stable/")
+st.markdown("- Bandit (security): https://bandit.readthedocs.io/en/latest/")
+st.markdown("- Black (format): https://black.readthedocs.io/en/stable/")
+st.markdown("- isort (imports): https://pycqa.github.io/isort/")
+st.markdown("- pydocstyle (docstrings): https://www.pydocstyle.org/en/stable/")
