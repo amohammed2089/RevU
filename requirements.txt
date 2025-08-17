@@ -1,4 +1,9 @@
-streamlit==1.37.1
+streamlit
 ruff==0.6.9
 openai==1.97.2
 pillow==10.4.0
+mypy
+bandit
+black
+isort
+pydocstyle
