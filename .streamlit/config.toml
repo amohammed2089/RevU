@@ -2,14 +2,8 @@
 headless = true
 port = 8501
 enableCORS = true
-enableXsrfProtection = true
-
-[browser]
-gatherUsageStats = false
 
 [theme]
-primaryColor = "#e74c3c"
-backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#f0f2f6"
-textColor = "#262730"
-font = "sans serif"
+base="light"
+primaryColor="#2563EB"
+textColor="#111827"
